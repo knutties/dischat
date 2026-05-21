@@ -194,10 +194,16 @@
     #${ROOT_ID} .dc-thr-divider::after { content: ''; flex: 1; height: 1px; }
 
     #${ROOT_ID} .dc-compose { padding: 0 20px 16px; background: #1a1d21; flex-shrink: 0; }
-    #${ROOT_ID} .dc-compose .box { background: transparent; border: 1px solid #565856; border-radius: 8px; padding: 10px 14px; color: #b9b9b9; font-size: 13px; display: flex; align-items: center; gap: 10px; }
-    #${ROOT_ID} .dc-compose .box:hover { border-color: #797979; }
-    #${ROOT_ID} .dc-compose a { color: #1d9bd1; text-decoration: none; font-weight: 600; white-space: nowrap; }
-    #${ROOT_ID} .dc-compose a:hover { text-decoration: underline; }
+    #${ROOT_ID} .dc-compose .row { background: transparent; border: 1px solid #565856; border-radius: 8px; padding: 8px 10px 8px 14px; display: flex; align-items: end; gap: 8px; transition: border-color .1s ease; }
+    #${ROOT_ID} .dc-compose .row:focus-within { border-color: #1d9bd1; }
+    #${ROOT_ID} .compose-input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font: inherit; resize: none; min-height: 22px; max-height: 200px; line-height: 1.46; padding: 3px 0; }
+    #${ROOT_ID} .compose-input::placeholder { color: #6a6772; }
+    #${ROOT_ID} .compose-send { background: transparent; border: 1px solid #1d9bd1; color: #1d9bd1; min-width: 32px; height: 32px; border-radius: 4px; cursor: pointer; font: 600 13px/1 inherit; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; }
+    #${ROOT_ID} .compose-send:hover { background: #1d9bd1; color: #fff; }
+    #${ROOT_ID} .compose-send:disabled { opacity: .4; cursor: not-allowed; }
+    #${ROOT_ID} .compose-hint { font-size: 11px; color: #6a6772; padding: 4px 4px 0; }
+    #${ROOT_ID} .compose-hint kbd { background: #2c2d30; border: 1px solid #383b40; border-radius: 3px; padding: 0 4px; font: 10px/1.5 SFMono-Regular, Consolas, monospace; color: #d1d2d3; }
+    #${ROOT_ID} .compose-busy { opacity: .5; pointer-events: none; }
 
     #${ROOT_ID} .dc-empty { padding: 60px 20px; color: #9a9b9e; text-align: center; font-size: 14px; }
     #${ROOT_ID} .dc-empty h3 { color: #fff; margin: 0 0 10px; font-size: 18px; }
@@ -423,7 +429,8 @@
           m.replies.length + (m.replies.length === 1 ? ' reply' : ' replies')
         ),
         m.replies.map((r) => renderMessage(r))
-      )
+      ),
+      buildCompose({ placeholder: 'Reply…', mode: 'thread', ctxNode: m.node })
     );
   }
 
@@ -540,27 +547,10 @@
       )
     );
 
-    const compose = h(
-      'div',
-      { class: 'dc-compose' },
-      h(
-        'div',
-        { class: 'box' },
-        h('span', null, 'Message #' + channelName),
-        h('span', { style: { flex: '1' } }),
-        h(
-          'a',
-          {
-            href: location.href,
-            onclick: (e) => {
-              e.preventDefault();
-              closeChat();
-            },
-          },
-          'Reply on GitHub →'
-        )
-      )
-    );
+    const compose = buildCompose({
+      placeholder: 'Message #' + channelName,
+      mode: 'top',
+    });
 
     const main = h(
       'div',
@@ -673,6 +663,176 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  // ---------- compose / post ----------
+  function buildCompose(opts) {
+    opts = opts || {};
+    const textarea = h('textarea', {
+      class: 'compose-input',
+      placeholder: opts.placeholder || 'Message',
+      rows: '1',
+      spellcheck: 'true',
+    });
+
+    function autoGrow() {
+      textarea.style.height = 'auto';
+      textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    }
+
+    function send() {
+      const v = textarea.value.trim();
+      if (!v) return;
+      postToGithub(v, opts);
+    }
+
+    textarea.addEventListener('input', autoGrow);
+    textarea.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    const sendBtn = h(
+      'button',
+      { class: 'compose-send', onclick: send, title: 'Send (Enter)', type: 'button' },
+      'Send'
+    );
+
+    return h(
+      'div',
+      { class: 'dc-compose' },
+      h('div', { class: 'row' }, textarea, sendBtn),
+      h(
+        'div',
+        { class: 'compose-hint' },
+        '↵ to send · Shift+↵ for newline · posts via GitHub\'s comment form'
+      )
+    );
+  }
+
+  // Set the value on a React-controlled textarea such that React notices.
+  function setReactValue(el, value) {
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (setter && setter.set) setter.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function visible(el) {
+    if (!el || !el.offsetParent) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  function findGithubTextarea(ctxNode) {
+    const root = document.getElementById(ROOT_ID);
+    const isExternal = (el) => el && (!root || !root.contains(el));
+
+    // Try the context-specific area first (for thread replies).
+    if (ctxNode) {
+      const tas = Array.from(ctxNode.querySelectorAll('textarea')).filter(isExternal).filter(visible);
+      if (tas.length) return tas[tas.length - 1];
+      // Also look at next siblings — GH renders reply form below the comment.
+      let sib = ctxNode.nextElementSibling;
+      for (let i = 0; sib && i < 3; i++, sib = sib.nextElementSibling) {
+        const ta = sib.querySelector && sib.querySelector('textarea');
+        if (ta && isExternal(ta) && visible(ta)) return ta;
+      }
+    }
+
+    const sels = [
+      'form.js-new-comment-form textarea',
+      'textarea[name="comment[body]"]',
+      'textarea[name="commentBody"]',
+      'textarea[name="discussion_comment[body]"]',
+      'textarea.js-comment-field',
+      'textarea[aria-label*="comment body" i]',
+      'textarea[aria-label*="reply" i]',
+      'textarea[placeholder*="reply" i]',
+      'textarea[placeholder*="comment" i]',
+      'textarea',
+    ];
+    for (const sel of sels) {
+      const cands = Array.from(document.querySelectorAll(sel)).filter(isExternal).filter(visible);
+      if (cands.length) return cands[cands.length - 1];
+    }
+    return null;
+  }
+
+  function findSubmitButton(textarea) {
+    if (!textarea) return null;
+    const form = textarea.closest('form');
+    if (form) {
+      const btn = form.querySelector('button[type=submit]:not([disabled])') ||
+                  form.querySelector('button[type=submit]');
+      if (btn) return btn;
+    }
+    // Walk up and look for a nearby Comment/Reply/Post button.
+    let scope = textarea.closest('form, [class*="CommentBox"], [class*="comment-box" i], section, article') || document.body;
+    const btns = Array.from(scope.querySelectorAll('button')).filter((b) => {
+      const t = (b.textContent || '').trim();
+      return /^(comment|reply|post|send)$/i.test(t);
+    });
+    return btns[btns.length - 1] || null;
+  }
+
+  function postToGithub(text, opts) {
+    const root = document.getElementById(ROOT_ID);
+    const ctxNode = opts && opts.ctxNode;
+    const composeEl = root && root.querySelector('.dc-compose');
+
+    const ta = findGithubTextarea(ctxNode);
+    if (!ta) {
+      alert(
+        'Dischat: couldn\'t find GitHub\'s comment box on this page.\n' +
+          'Make sure you\'re signed in and that the page has a reply form.'
+      );
+      return;
+    }
+
+    if (composeEl) composeEl.classList.add('compose-busy');
+
+    setReactValue(ta, text);
+    const btn = findSubmitButton(ta);
+
+    if (!btn) {
+      if (composeEl) composeEl.classList.remove('compose-busy');
+      alert(
+        'Dischat: your message is in GitHub\'s reply box, but the Comment button isn\'t findable. Closing the overlay so you can click Comment yourself.'
+      );
+      closeChat();
+      ta.focus();
+      ta.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    // Give React a tick to enable the submit button after the input event.
+    setTimeout(function () {
+      if (btn.disabled) {
+        // Try once more after a slightly longer delay.
+        setTimeout(function () {
+          if (btn.disabled) {
+            if (composeEl) composeEl.classList.remove('compose-busy');
+            alert(
+              'Dischat: GitHub\'s Comment button is still disabled (validation pending). Closing the overlay so you can submit manually.'
+            );
+            closeChat();
+            ta.focus();
+            ta.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+          }
+          btn.click();
+          setTimeout(function () { location.reload(); }, 1800);
+        }, 400);
+        return;
+      }
+      btn.click();
+      setTimeout(function () { location.reload(); }, 1800);
+    }, 80);
   }
 
   function closeChat() {

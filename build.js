@@ -23,6 +23,40 @@ const BEGIN = '<!-- BOOKMARKLET_BEGIN -->';
 const END = '<!-- BOOKMARKLET_END -->';
 const BEGIN_RAW = '<!-- BOOKMARKLET_RAW_BEGIN -->';
 const END_RAW = '<!-- BOOKMARKLET_RAW_END -->';
+const BEGIN_VER = '<!-- VERSION_BEGIN -->';
+const END_VER = '<!-- VERSION_END -->';
+
+function gitInfo() {
+  try {
+    const sha = execFileSync('git', ['rev-parse', '--short=10', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const full = execFileSync('git', ['rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    let dirty = '';
+    try {
+      const out = execFileSync('git', ['status', '--porcelain'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      // Ignore changes to files we're about to rewrite ourselves.
+      const tracked = out
+        .split('\n')
+        .filter(Boolean)
+        .filter((l) => {
+          const p = l.slice(3);
+          return p !== 'index.html' && p !== 'bookmarklet.txt';
+        });
+      if (tracked.length) dirty = '-dirty';
+    } catch (_) {}
+    return { sha: sha + dirty, full };
+  } catch (_) {
+    return { sha: 'dev', full: '' };
+  }
+}
 
 function minify(src) {
   return execFileSync(
@@ -49,6 +83,9 @@ function splice(html, begin, end, replacement) {
   return html.slice(0, i + begin.length) + '\n' + replacement + '\n' + html.slice(j);
 }
 
+const { sha, full } = gitInfo();
+const buildDate = new Date().toISOString().slice(0, 10);
+
 const minified = minify(fs.readFileSync(SRC, 'utf8'));
 const url = 'javascript:' + encodeURIComponent(minified);
 
@@ -57,11 +94,21 @@ fs.writeFileSync(OUT_TXT, url + '\n');
 const anchor =
   `        <a class="bookmarklet" title="Drag me to your bookmarks bar" href="${htmlEscape(url)}">▸ dischat</a>`;
 
+const verHref = full
+  ? `https://github.com/knutties/dischat/commit/${full}`
+  : 'https://github.com/knutties/dischat';
+const versionLine =
+  `      <span class="version">built <span class="version-date">${buildDate}</span> · ` +
+  `<a class="version-sha" href="${htmlEscape(verHref)}" target="_blank" rel="noopener">` +
+  `${htmlEscape(sha)}</a></span>`;
+
 let html = fs.readFileSync(HTML, 'utf8');
 html = splice(html, BEGIN, END, anchor);
 html = splice(html, BEGIN_RAW, END_RAW, `      <pre><code>${htmlEscape(url)}</code></pre>`);
+html = splice(html, BEGIN_VER, END_VER, versionLine);
 fs.writeFileSync(HTML, html);
 
+console.log(`commit:   ${sha}`);
 console.log(`minified: ${minified.length} bytes`);
 console.log(`encoded:  ${url.length} bytes`);
 console.log(`wrote:    bookmarklet.txt, index.html`);

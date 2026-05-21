@@ -60,6 +60,10 @@
       a { color: var(--accent); }
       .note { background: rgba(29, 155, 209, 0.08); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 4px; margin: 16px 0; font-size: 14px; }
       footer { margin-top: 60px; color: var(--muted); font-size: 13px; text-align: center; }
+      footer .version { display: block; margin-top: 6px; font-size: 12px; color: #6a6772; }
+      footer .version a { color: #6a6772; text-decoration: none; font-family: SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+      footer .version a:hover { color: var(--accent); text-decoration: underline; }
+      footer .version-date { color: #6a6772; }
       kbd {
         background: var(--card); border: 1px solid var(--border); border-bottom-width: 2px;
         border-radius: 4px; padding: 2px 6px; font: 12px/1 SFMono-Regular, Consolas, monospace;
@@ -145,6 +149,9 @@
 
       <footer>
         <a href="https://github.com/knutties/dischat">github.com/knutties/dischat</a>
+        <!-- VERSION_BEGIN -->
+      <span class="version">built <span class="version-date">2026-05-21</span> · <a class="version-sha" href="https://github.com/knutties/dischat/commit/8a5d8905be50eecc8765ea2258baa53122f554b0" target="_blank" rel="noopener">8a5d8905be</a></span>
+<!-- VERSION_END -->
       </footer>
     </div>
   </body>

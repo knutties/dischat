@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dischat — turn GitHub Discussions into Slack</title>
+    <style>
+      :root {
+        --bg: #1a1d21;
+        --sidebar: #19171d;
+        --fg: #d1d2d3;
+        --fg-strong: #fff;
+        --muted: #9a9b9e;
+        --accent: #1d9bd1;
+        --accent-hover: #1264a3;
+        --border: #383b40;
+        --card: #222529;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--bg); color: var(--fg);
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        min-height: 100vh;
+      }
+      .wrap { max-width: 760px; margin: 0 auto; padding: 60px 24px 80px; }
+      header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+      h1 { font: 900 36px/1.1 inherit; color: var(--fg-strong); margin: 0; letter-spacing: -0.02em; }
+      .tag { color: var(--muted); font-size: 14px; }
+      .tag code { background: var(--card); padding: 2px 6px; border-radius: 4px; color: #e8912d; font-size: 13px; }
+      p.lede { font-size: 18px; color: var(--fg); margin: 8px 0 32px; }
+
+      .install {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 12px; padding: 28px;
+        display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+        margin-bottom: 32px;
+      }
+      .install-text { flex: 1; min-width: 240px; }
+      .install-text h2 { margin: 0 0 4px; color: var(--fg-strong); font: 900 20px/1.2 inherit; }
+      .install-text p { margin: 0; color: var(--muted); font-size: 14px; }
+      .bookmarklet {
+        display: inline-block; background: var(--accent); color: var(--fg-strong) !important;
+        padding: 14px 22px; border-radius: 8px;
+        font: 900 16px/1 inherit; text-decoration: none;
+        cursor: grab; user-select: none;
+        box-shadow: 0 2px 0 #0e6ea7;
+      }
+      .bookmarklet:hover { background: var(--accent-hover); }
+      .bookmarklet:active { cursor: grabbing; box-shadow: 0 0 0 #0e6ea7; transform: translateY(2px); }
+
+      h2 { font: 900 22px/1.2 inherit; color: var(--fg-strong); margin: 40px 0 12px; }
+      h3 { font: 700 16px/1.2 inherit; color: var(--fg-strong); margin: 24px 0 8px; }
+      ul, ol { padding-left: 22px; }
+      li { margin: 6px 0; }
+      code, pre { font: 13px/1.5 SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+      code { background: var(--card); padding: 1px 5px; border-radius: 4px; color: #e8912d; }
+      pre { background: #0e0e0e; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+      pre code { background: transparent; padding: 0; color: var(--fg); }
+      a { color: var(--accent); }
+      .note { background: rgba(29, 155, 209, 0.08); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 4px; margin: 16px 0; font-size: 14px; }
+      footer { margin-top: 60px; color: var(--muted); font-size: 13px; text-align: center; }
+      kbd {
+        background: var(--card); border: 1px solid var(--border); border-bottom-width: 2px;
+        border-radius: 4px; padding: 2px 6px; font: 12px/1 SFMono-Regular, Consolas, monospace;
+        color: var(--fg-strong);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>dischat</h1>
+        <span class="tag">a <code>javascript:</code> bookmarklet</span>
+      </header>
+      <p class="lede">
+        Turns any GitHub Discussions page into a Slack-style group chat — channels in the
+        sidebar, messages in the middle, threaded replies in a side panel.
+      </p>
+
+      <div class="install">
+        <div class="install-text">
+          <h2>Install</h2>
+          <p>
+            Drag this button to your bookmarks bar. Then click it on any
+            <code>github.com/.../discussions</code> page.
+          </p>
+        </div>
+        <!-- The minified loader. Re-runs are toggles (the script removes itself if mounted). -->
+        <a
+          class="bookmarklet"
+          title="Drag me to your bookmarks bar"
+          href="javascript:(function(){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/gh/knutties/dischat@main/dischat.js?_='+Date.now();s.onerror=function(){alert('Dischat: failed to load.')};document.body.appendChild(s)})();"
+        >▸ dischat</a>
+      </div>
+
+      <h2>How it works</h2>
+      <ol>
+        <li>The bookmarklet fetches <code>dischat.js</code> from jsDelivr (a CDN mirror of this repo).</li>
+        <li>The script scrapes the rendered DOM — author names, avatars, comment bodies,
+            timestamps, and nested replies.</li>
+        <li>It paints a full-screen overlay styled like Slack. The original GitHub page is
+            untouched underneath.</li>
+        <li>Click the bookmarklet again — or press <kbd>Esc</kbd> — to dismiss the overlay.</li>
+      </ol>
+
+      <h2>What you get</h2>
+      <ul>
+        <li><strong>Single discussion view:</strong> top-level comments become messages in a
+            channel; nested replies open in a side thread (Slack-style).</li>
+        <li><strong>Discussions index view:</strong> each discussion is rendered as a
+            channel in the sidebar and as a message preview in the list.</li>
+        <li>Day separators, grouped consecutive messages from the same author, OP badge on
+            the original poster, "Answer" badge on accepted answers (when GitHub marks them).</li>
+        <li>The chat is read-only — clicking <em>Reply on GitHub</em> closes the overlay so
+            you can use GitHub's normal comment box.</li>
+      </ul>
+
+      <h2>Manual install</h2>
+      <p>If dragging doesn't work in your browser, right-click the button above and choose
+        "Bookmark this link", or create a new bookmark with this URL:</p>
+      <pre><code>javascript:(function(){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/gh/knutties/dischat@main/dischat.js?_='+Date.now();s.onerror=function(){alert('Dischat: failed to load.')};document.body.appendChild(s)})();</code></pre>
+
+      <div class="note">
+        <strong>jsDelivr cache:</strong> changes to <code>dischat.js</code> propagate to the
+        CDN within ~12 hours. To force a refresh, visit
+        <code>https://purge.jsdelivr.net/gh/knutties/dischat@main/dischat.js</code>.
+      </div>
+
+      <h2>Caveats</h2>
+      <ul>
+        <li>GitHub's DOM changes — if the script can't find comments it shows a "no
+            messages found" empty state. Selectors live in <code>findCommentElements</code>
+            in <code>dischat.js</code>.</li>
+        <li>Read-only by design. Posting comments would require a GitHub OAuth token; out
+            of scope for a bookmarklet.</li>
+        <li>Comment bodies are reused as-is from GitHub's already-rendered HTML, so they
+            inherit GitHub's sanitization.</li>
+      </ul>
+
+      <footer>
+        <a href="https://github.com/knutties/dischat">github.com/knutties/dischat</a>
+      </footer>
+    </div>
+  </body>
+</html>

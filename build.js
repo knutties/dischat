@@ -1,9 +1,16 @@
 #!/usr/bin/env node
-/* build.js — minify dischat.js, encode it as a `javascript:` URL, and write
- * the result to bookmarklet.txt + splice it into index.html.
+/* build.js — minify dischat.js, encode it as a `javascript:` URL, splice
+ * the result into index.html, and stamp the build with a CalVer version.
  *
- * Usage:  node build.js
- * Requires: terser (run via `npx --yes terser`).
+ * Usage:
+ *   node build.js          # build (compute next CalVer + embed it)
+ *   node build.js --tag    # tag the current HEAD with the embedded CalVer
+ *
+ * Typical release flow:
+ *   node build.js
+ *   git add -A && git commit -m "Release vYYYY.MM.DD"
+ *   node build.js --tag
+ *   git push --follow-tags
  *
  * Why inline?  github.com sends a strict CSP (`script-src
  * github.githubassets.com`) which blocks `<script src=...>` from any other
@@ -18,6 +25,7 @@ const { execFileSync } = require('child_process');
 const SRC = path.join(__dirname, 'dischat.js');
 const HTML = path.join(__dirname, 'index.html');
 const OUT_TXT = path.join(__dirname, 'bookmarklet.txt');
+const VERSION_FILE = path.join(__dirname, 'VERSION');
 
 const BEGIN = '<!-- BOOKMARKLET_BEGIN -->';
 const END = '<!-- BOOKMARKLET_END -->';
@@ -26,37 +34,7 @@ const END_RAW = '<!-- BOOKMARKLET_RAW_END -->';
 const BEGIN_VER = '<!-- VERSION_BEGIN -->';
 const END_VER = '<!-- VERSION_END -->';
 
-function gitInfo() {
-  try {
-    const sha = execFileSync('git', ['rev-parse', '--short=10', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    const full = execFileSync('git', ['rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    let dirty = '';
-    try {
-      const out = execFileSync('git', ['status', '--porcelain'], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      // Ignore changes to files we're about to rewrite ourselves.
-      const tracked = out
-        .split('\n')
-        .filter(Boolean)
-        .filter((l) => {
-          const p = l.slice(3);
-          return p !== 'index.html' && p !== 'bookmarklet.txt';
-        });
-      if (tracked.length) dirty = '-dirty';
-    } catch (_) {}
-    return { sha: sha + dirty, full };
-  } catch (_) {
-    return { sha: 'dev', full: '' };
-  }
-}
+const TAG_ONLY = process.argv.includes('--tag');
 
 function minify(src) {
   return execFileSync(
@@ -83,8 +61,60 @@ function splice(html, begin, end, replacement) {
   return html.slice(0, i + begin.length) + '\n' + replacement + '\n' + html.slice(j);
 }
 
-const { sha, full } = gitInfo();
-const buildDate = new Date().toISOString().slice(0, 10);
+function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+// CalVer: YYYY.MM.DD, with `.N` suffix when same-day tags already exist
+// (v2026.05.21 → v2026.05.21.2 → v2026.05.21.3 …).
+function nextCalVer() {
+  const d = new Date();
+  const today = d.getFullYear() + '.' + pad(d.getMonth() + 1) + '.' + pad(d.getDate());
+  let same = [];
+  try {
+    same = execFileSync(
+      'git',
+      ['tag', '-l', 'v' + today, 'v' + today + '.*'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    )
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch (_) {}
+  if (!same.length) return today;
+  // Highest suffix: v2026.05.21 → 1; v2026.05.21.3 → 3
+  let max = 1;
+  for (const t of same) {
+    const m = t.match(/^v\d{4}\.\d{2}\.\d{2}(?:\.(\d+))?$/);
+    if (!m) continue;
+    const n = m[1] ? parseInt(m[1], 10) : 1;
+    if (n > max) max = n;
+  }
+  return today + '.' + (max + 1);
+}
+
+if (TAG_ONLY) {
+  if (!fs.existsSync(VERSION_FILE)) {
+    console.error('No VERSION file. Run `node build.js` first.');
+    process.exit(1);
+  }
+  const v = fs.readFileSync(VERSION_FILE, 'utf8').trim();
+  if (!/^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/.test(v)) {
+    console.error('VERSION file contents look invalid: ' + JSON.stringify(v));
+    process.exit(1);
+  }
+  try {
+    execFileSync('git', ['tag', '-a', 'v' + v, '-m', 'Release v' + v], {
+      stdio: 'inherit',
+    });
+    console.log('tagged: v' + v);
+  } catch (e) {
+    console.error('tag failed: ' + e.message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+const version = nextCalVer();
+fs.writeFileSync(VERSION_FILE, version + '\n');
 
 const minified = minify(fs.readFileSync(SRC, 'utf8'));
 const url = 'javascript:' + encodeURIComponent(minified);
@@ -94,13 +124,12 @@ fs.writeFileSync(OUT_TXT, url + '\n');
 const anchor =
   `        <a class="bookmarklet" title="Drag me to your bookmarks bar" href="${htmlEscape(url)}">▸ dischat</a>`;
 
-const verHref = full
-  ? `https://github.com/knutties/dischat/commit/${full}`
-  : 'https://github.com/knutties/dischat';
+const tagHref = 'https://github.com/knutties/dischat/releases/tag/v' + version;
 const versionLine =
-  `      <span class="version">built <span class="version-date">${buildDate}</span> · ` +
-  `<a class="version-sha" href="${htmlEscape(verHref)}" target="_blank" rel="noopener">` +
-  `${htmlEscape(sha)}</a></span>`;
+  '        <span class="version">' +
+  '<a class="version-tag" href="' + htmlEscape(tagHref) + '" target="_blank" rel="noopener">' +
+  'v' + htmlEscape(version) + '</a>' +
+  '</span>';
 
 let html = fs.readFileSync(HTML, 'utf8');
 html = splice(html, BEGIN, END, anchor);
@@ -108,7 +137,7 @@ html = splice(html, BEGIN_RAW, END_RAW, `      <pre><code>${htmlEscape(url)}</co
 html = splice(html, BEGIN_VER, END_VER, versionLine);
 fs.writeFileSync(HTML, html);
 
-console.log(`commit:   ${sha}`);
-console.log(`minified: ${minified.length} bytes`);
-console.log(`encoded:  ${url.length} bytes`);
-console.log(`wrote:    bookmarklet.txt, index.html`);
+console.log('version:  v' + version);
+console.log('minified: ' + minified.length + ' bytes');
+console.log('encoded:  ' + url.length + ' bytes');
+console.log('wrote:    bookmarklet.txt, index.html, VERSION');

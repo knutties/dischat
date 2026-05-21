@@ -19,6 +19,10 @@
   const singleMatch = location.pathname.match(/^\/([^/]+)\/([^/]+)\/discussions\/(\d+)/);
   const indexMatch = location.pathname.match(/^\/([^/]+)\/([^/]+)\/discussions\/?$/);
 
+  // Module-level state for in-place refresh.
+  let _channelName = '';
+  let _openThreadId = null;
+
   if (!singleMatch && !indexMatch) {
     alert(
       'Dischat needs a GitHub Discussions page.\n\n' +
@@ -217,6 +221,17 @@
   }
 
   // ---------- DOM scraping ----------
+  function commentId(el) {
+    // Walk up to capture the first id like `discussioncomment-123` or `issuecomment-...`.
+    let cur = el;
+    while (cur && cur !== document.body) {
+      const id = cur.id || '';
+      if (/^(discussioncomment|issuecomment|comment)[-_]\w+/i.test(id)) return id;
+      cur = cur.parentElement;
+    }
+    return el.id || null;
+  }
+
   function scrapeMessage(el) {
     const authorEl =
       el.querySelector('.timeline-comment-header a.author') ||
@@ -239,6 +254,7 @@
       /marked.*answer|chosen.*answer/i.test(el.getAttribute('aria-label') || '');
 
     return {
+      id: commentId(el),
       author: txt(authorEl) || 'unknown',
       authorUrl: authorEl ? authorEl.href : '',
       avatar: avatarEl ? avatarEl.src : '',
@@ -298,31 +314,84 @@
     let state = txt(stateNode);
     if (state.length > 16) state = '';
 
-    const comments = findCommentElements();
+    const root = document.getElementById(ROOT_ID);
+    const inRoot = (el) => root && root.contains(el);
 
-    // Group: a comment whose ancestor is also a comment is a reply.
-    const set = new Set(comments);
-    const tops = [];
-    const repliesByOwner = new Map();
-    for (const c of comments) {
-      let p = c.parentElement;
-      let owner = null;
-      while (p) {
-        if (set.has(p)) { owner = p; break; }
-        p = p.parentElement;
-      }
-      if (!owner) tops.push(c);
-      else {
-        if (!repliesByOwner.has(owner)) repliesByOwner.set(owner, []);
-        repliesByOwner.get(owner).push(c);
-      }
+    let messages = [];
+
+    // Preferred: each top-level discussion comment lives inside its own
+    // `.js-timeline-item` container; nested replies are descendants of that
+    // same container. This handles the common case where GitHub renders
+    // replies as siblings of the top comment within the item (not nested
+    // inside the top comment element itself).
+    const itemSels = [
+      '.js-timeline-item',
+      '.TimelineItem',
+      '[data-testid="timeline-item"]',
+    ];
+    let items = [];
+    for (const sel of itemSels) {
+      items = $$(sel).filter(
+        (it) =>
+          !inRoot(it) &&
+          it.querySelector('.markdown-body, .comment-body, .js-comment-body, [class*="MarkdownContent"]') &&
+          it.querySelector('a.author, a[data-hovercard-type="user"]')
+      );
+      if (items.length) break;
     }
 
-    const messages = tops.map((t) => {
-      const m = scrapeMessage(t);
-      m.replies = (repliesByOwner.get(t) || []).map(scrapeMessage);
-      return m;
-    });
+    if (items.length) {
+      messages = items
+        .map((item) => {
+          const candidates = $$('.timeline-comment, .js-comment, [data-testid*="comment"]', item).filter(
+            (c) => c.querySelector('.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"]')
+          );
+          if (!candidates.length) return null;
+          // De-dupe nested wrappers within the same item.
+          const set = new Set(candidates);
+          const outers = candidates.filter((c) => {
+            let p = c.parentElement;
+            while (p && p !== item) {
+              if (set.has(p)) return false;
+              p = p.parentElement;
+            }
+            return true;
+          });
+          if (!outers.length) return null;
+          const top = scrapeMessage(outers[0]);
+          top.replies = outers.slice(1).map(scrapeMessage);
+          top.itemNode = item;
+          return top;
+        })
+        .filter(Boolean);
+    }
+
+    // Fallback: ancestor-walk grouping if timeline items aren't present.
+    if (!messages.length) {
+      const comments = findCommentElements();
+      const set = new Set(comments);
+      const tops = [];
+      const repliesByOwner = new Map();
+      for (const c of comments) {
+        let p = c.parentElement;
+        let owner = null;
+        while (p) {
+          if (set.has(p)) { owner = p; break; }
+          p = p.parentElement;
+        }
+        if (!owner) tops.push(c);
+        else {
+          if (!repliesByOwner.has(owner)) repliesByOwner.set(owner, []);
+          repliesByOwner.get(owner).push(c);
+        }
+      }
+      messages = tops.map((t) => {
+        const m = scrapeMessage(t);
+        m.replies = (repliesByOwner.get(t) || []).map(scrapeMessage);
+        m.itemNode = t.closest('.js-timeline-item, .TimelineItem') || t;
+        return m;
+      });
+    }
 
     return { title, category, state, messages };
   }
@@ -409,6 +478,7 @@
     const root = document.getElementById(ROOT_ID);
     if (!root) return;
     root.classList.add('thread-open');
+    _openThreadId = m.id || null;
     const thr = root.querySelector('.dc-thr');
     thr.innerHTML = '';
     thr.append(
@@ -430,13 +500,19 @@
         ),
         m.replies.map((r) => renderMessage(r))
       ),
-      buildCompose({ placeholder: 'Reply…', mode: 'thread', ctxNode: m.node })
+      buildCompose({
+        placeholder: 'Reply…',
+        mode: 'thread',
+        ctxNode: m.node,
+        ctxId: m.id,
+      })
     );
   }
 
   function closeThread() {
     const root = document.getElementById(ROOT_ID);
     if (root) root.classList.remove('thread-open');
+    _openThreadId = null;
   }
 
   function dayDivider(iso) {
@@ -492,6 +568,7 @@
   function renderSingle(root, org, repo, num) {
     const data = scrapeSingle();
     const channelName = channelize(data.title);
+    _channelName = channelName;
 
     const side = h(
       'div',
@@ -542,7 +619,7 @@
       h('span', { style: { flex: '1' } }),
       h(
         'span',
-        { class: 'meta' },
+        { class: 'meta dc-head-count' },
         data.messages.length + (data.messages.length === 1 ? ' message' : ' messages')
       )
     );
@@ -683,7 +760,7 @@
     function send() {
       const v = textarea.value.trim();
       if (!v) return;
-      postToGithub(v, opts);
+      postToGithub(v, Object.assign({}, opts, { textarea: textarea }));
     }
 
     textarea.addEventListener('input', autoGrow);
@@ -707,7 +784,7 @@
       h(
         'div',
         { class: 'compose-hint' },
-        '↵ to send · Shift+↵ for newline · posts via GitHub\'s comment form'
+        '↵ to send · Shift+↵ for newline'
       )
     );
   }
@@ -723,25 +800,79 @@
   }
 
   function visible(el) {
-    if (!el || !el.offsetParent) return false;
+    if (!el) return false;
+    if (!el.offsetParent && el !== document.body) {
+      // offsetParent is null for fixed-position or display:none; check rect too.
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   }
 
-  function findGithubTextarea(ctxNode) {
-    const root = document.getElementById(ROOT_ID);
-    const isExternal = (el) => el && (!root || !root.contains(el));
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
 
-    // Try the context-specific area first (for thread replies).
-    if (ctxNode) {
-      const tas = Array.from(ctxNode.querySelectorAll('textarea')).filter(isExternal).filter(visible);
-      if (tas.length) return tas[tas.length - 1];
-      // Also look at next siblings — GH renders reply form below the comment.
-      let sib = ctxNode.nextElementSibling;
-      for (let i = 0; sib && i < 3; i++, sib = sib.nextElementSibling) {
-        const ta = sib.querySelector && sib.querySelector('textarea');
-        if (ta && isExternal(ta) && visible(ta)) return ta;
+  async function waitFor(check, maxMs, intervalMs) {
+    const interval = intervalMs || 80;
+    const start = Date.now();
+    for (;;) {
+      const v = check();
+      if (v) return v;
+      if (Date.now() - start > (maxMs || 5000)) return null;
+      await sleep(interval);
+    }
+  }
+
+  function findSubmitButton(textarea) {
+    if (!textarea) return null;
+    const form = textarea.closest('form');
+    if (form) {
+      const btn = form.querySelector('button[type=submit]:not([disabled])') ||
+                  form.querySelector('button[type=submit]');
+      if (btn) return btn;
+    }
+    let scope = textarea.closest('form, [class*="CommentBox"], [class*="comment-box" i], section, article') || document.body;
+    const btns = Array.from(scope.querySelectorAll('button')).filter((b) => {
+      const t = (b.textContent || '').trim();
+      return /^(comment|reply|post|send)$/i.test(t);
+    });
+    return btns[btns.length - 1] || null;
+  }
+
+  // Find (and if necessary, open) the GitHub textarea that will accept the post.
+  // - For thread mode: scoped to the originating comment's timeline-item; clicks
+  //   the in-page Reply / Add comment trigger if the textarea isn't visible yet.
+  // - For top-level: the bottom-of-page comment form.
+  async function getGithubTextarea(ctxNode, isReply) {
+    const root = document.getElementById(ROOT_ID);
+    const external = (el) => el && (!root || !root.contains(el));
+    const visExt = (el) => external(el) && visible(el);
+
+    function findIn(container) {
+      const list = Array.from(container.querySelectorAll('textarea')).filter(visExt);
+      return list.length ? list[list.length - 1] : null;
+    }
+
+    if (isReply && ctxNode) {
+      const container =
+        (ctxNode.closest && (ctxNode.closest('.js-timeline-item') || ctxNode.closest('.TimelineItem'))) || ctxNode;
+      let ta = findIn(container);
+      if (ta) return ta;
+
+      // Try to expand a Reply trigger near the comment.
+      const triggers = Array.from(container.querySelectorAll('button, a, summary')).filter((b) => {
+        const t = (b.textContent || '').trim();
+        const al = (b.getAttribute && (b.getAttribute('aria-label') || '')) || '';
+        return /^(reply|add (a )?comment|write (a )?reply)$/i.test(t) || /reply/i.test(al);
+      });
+      for (const tr of triggers) {
+        try { tr.click(); } catch (e) {}
+        ta = await waitFor(() => findIn(container), 2500, 80);
+        if (ta) return ta;
       }
+      // Fallback to page-level form.
     }
 
     const sels = [
@@ -757,52 +888,54 @@
       'textarea',
     ];
     for (const sel of sels) {
-      const cands = Array.from(document.querySelectorAll(sel)).filter(isExternal).filter(visible);
+      const cands = Array.from(document.querySelectorAll(sel)).filter(visExt);
       if (cands.length) return cands[cands.length - 1];
     }
     return null;
   }
 
-  function findSubmitButton(textarea) {
-    if (!textarea) return null;
-    const form = textarea.closest('form');
-    if (form) {
-      const btn = form.querySelector('button[type=submit]:not([disabled])') ||
-                  form.querySelector('button[type=submit]');
-      if (btn) return btn;
-    }
-    // Walk up and look for a nearby Comment/Reply/Post button.
-    let scope = textarea.closest('form, [class*="CommentBox"], [class*="comment-box" i], section, article') || document.body;
-    const btns = Array.from(scope.querySelectorAll('button')).filter((b) => {
-      const t = (b.textContent || '').trim();
-      return /^(comment|reply|post|send)$/i.test(t);
-    });
-    return btns[btns.length - 1] || null;
+  function topCount() {
+    return scrapeSingle().messages.length;
+  }
+  function replyCountFor(id) {
+    const data = scrapeSingle();
+    const m = data.messages.find((mm) => mm.id && mm.id === id);
+    return m ? m.replies.length : null;
   }
 
-  function postToGithub(text, opts) {
+  async function postToGithub(text, opts) {
     const root = document.getElementById(ROOT_ID);
-    const ctxNode = opts && opts.ctxNode;
-    const composeEl = root && root.querySelector('.dc-compose');
+    if (!root) return;
 
-    const ta = findGithubTextarea(ctxNode);
+    const isReply = !!(opts && opts.mode === 'thread');
+    const ctxNode = opts && opts.ctxNode;
+    const ctxId = opts && opts.ctxId;
+    const overlayCompose =
+      (isReply && root.querySelector('.dc-thr .dc-compose')) ||
+      root.querySelector('.dc-main .dc-compose');
+    const overlayInput = opts && opts.textarea;
+
+    if (overlayCompose) overlayCompose.classList.add('compose-busy');
+
+    const ta = await getGithubTextarea(ctxNode, isReply);
     if (!ta) {
+      if (overlayCompose) overlayCompose.classList.remove('compose-busy');
       alert(
-        'Dischat: couldn\'t find GitHub\'s comment box on this page.\n' +
-          'Make sure you\'re signed in and that the page has a reply form.'
+        "Dischat: couldn't find GitHub's reply box.\n" +
+          (isReply
+            ? "This comment may not have a Reply trigger — try opening the discussion in GitHub once to confirm."
+            : "Make sure you're signed in and the discussion is open for comments.")
       );
       return;
     }
 
-    if (composeEl) composeEl.classList.add('compose-busy');
-
     setReactValue(ta, text);
-    const btn = findSubmitButton(ta);
 
+    const btn = findSubmitButton(ta);
     if (!btn) {
-      if (composeEl) composeEl.classList.remove('compose-busy');
+      if (overlayCompose) overlayCompose.classList.remove('compose-busy');
       alert(
-        'Dischat: your message is in GitHub\'s reply box, but the Comment button isn\'t findable. Closing the overlay so you can click Comment yourself.'
+        "Dischat: your message is in GitHub's reply box, but the submit button isn't findable. Closing the overlay so you can finish manually."
       );
       closeChat();
       ta.focus();
@@ -810,29 +943,102 @@
       return;
     }
 
-    // Give React a tick to enable the submit button after the input event.
-    setTimeout(function () {
-      if (btn.disabled) {
-        // Try once more after a slightly longer delay.
-        setTimeout(function () {
-          if (btn.disabled) {
-            if (composeEl) composeEl.classList.remove('compose-busy');
-            alert(
-              'Dischat: GitHub\'s Comment button is still disabled (validation pending). Closing the overlay so you can submit manually.'
-            );
-            closeChat();
-            ta.focus();
-            ta.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            return;
-          }
-          btn.click();
-          setTimeout(function () { location.reload(); }, 1800);
-        }, 400);
-        return;
-      }
-      btn.click();
-      setTimeout(function () { location.reload(); }, 1800);
-    }, 80);
+    // Wait for the button to enable (React validation runs after input).
+    const enabled = await waitFor(() => !btn.disabled, 1500, 60);
+    if (!enabled) {
+      if (overlayCompose) overlayCompose.classList.remove('compose-busy');
+      alert("Dischat: GitHub's submit button stayed disabled — closing overlay so you can finish manually.");
+      closeChat();
+      ta.focus();
+      return;
+    }
+
+    // Snapshot count, click submit, wait for the count to grow (or timeout).
+    const probe = isReply ? () => replyCountFor(ctxId) : topCount;
+    const before = probe();
+    btn.click();
+
+    const grew = await waitFor(() => {
+      const v = probe();
+      if (v == null) return false;
+      return v > (before || 0) ? v : false;
+    }, 12000, 250);
+
+    if (overlayInput) {
+      overlayInput.value = '';
+      overlayInput.style.height = 'auto';
+    }
+    if (overlayCompose) overlayCompose.classList.remove('compose-busy');
+
+    if (!grew) {
+      // Couldn't confirm — most likely the post still landed; refresh once anyway.
+      refreshMain();
+      return;
+    }
+    refreshMain();
+  }
+
+  // Re-scrape and replace the message list (and an open thread) in place.
+  function refreshMain() {
+    const root = document.getElementById(ROOT_ID);
+    if (!root) return null;
+    const mainEl = root.querySelector('.dc-main');
+    if (!mainEl) return null;
+    const oldMsgs = mainEl.querySelector('.dc-msgs');
+    if (!oldMsgs) return null;
+
+    const data = scrapeSingle();
+    const newMsgs = renderMessageList(data.messages, _channelName);
+    mainEl.replaceChild(newMsgs, oldMsgs);
+    newMsgs.scrollTop = newMsgs.scrollHeight;
+
+    const counter = mainEl.querySelector('.dc-head-count');
+    if (counter) {
+      counter.textContent =
+        data.messages.length + (data.messages.length === 1 ? ' message' : ' messages');
+    }
+
+    if (_openThreadId) {
+      const updated = data.messages.find((m) => m.id && m.id === _openThreadId);
+      if (updated) refreshThread(updated);
+    }
+    return data;
+  }
+
+  function refreshThread(message) {
+    const root = document.getElementById(ROOT_ID);
+    if (!root || !root.classList.contains('thread-open')) return;
+    const thr = root.querySelector('.dc-thr');
+    if (!thr) return;
+    thr.innerHTML = '';
+    thr.append(
+      h(
+        'div',
+        { class: 'dc-thr-head' },
+        h('span', { class: 'ttl' }, 'Thread'),
+        h('span', { class: 'when' }, '#' + _channelName),
+        h('button', { onclick: closeThread, title: 'Close thread' }, '×')
+      ),
+      h(
+        'div',
+        { class: 'dc-thr-msgs' },
+        renderMessage(message, { isOp: false }),
+        h(
+          'div',
+          { class: 'dc-thr-divider' },
+          message.replies.length + (message.replies.length === 1 ? ' reply' : ' replies')
+        ),
+        message.replies.map((r) => renderMessage(r))
+      ),
+      buildCompose({
+        placeholder: 'Reply…',
+        mode: 'thread',
+        ctxNode: message.node,
+        ctxId: message.id,
+      })
+    );
+    const msgs = thr.querySelector('.dc-thr-msgs');
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
   }
 
   function closeChat() {

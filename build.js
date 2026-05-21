@@ -6,9 +6,11 @@
  *   node build.js          # build (compute next CalVer + embed it)
  *   node build.js --tag    # tag the current HEAD with the embedded CalVer
  *
+ * Versions are CalVer in UTC: YYYY.MM.DD.HHMM (e.g. v2026.05.21.1432).
+ *
  * Typical release flow:
  *   node build.js
- *   git add -A && git commit -m "Release vYYYY.MM.DD"
+ *   git add -A && git commit -m "Release v$(cat VERSION)"
  *   node build.js --tag
  *   git push --follow-tags
  *
@@ -63,32 +65,17 @@ function splice(html, begin, end, replacement) {
 
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
 
-// CalVer: YYYY.MM.DD, with `.N` suffix when same-day tags already exist
-// (v2026.05.21 → v2026.05.21.2 → v2026.05.21.3 …).
+// CalVer: YYYY.MM.DD.HHMM in UTC — minute granularity so multiple
+// same-day releases each get a distinct version without needing a
+// disambiguation suffix.
 function nextCalVer() {
   const d = new Date();
-  const today = d.getFullYear() + '.' + pad(d.getMonth() + 1) + '.' + pad(d.getDate());
-  let same = [];
-  try {
-    same = execFileSync(
-      'git',
-      ['tag', '-l', 'v' + today, 'v' + today + '.*'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    )
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } catch (_) {}
-  if (!same.length) return today;
-  // Highest suffix: v2026.05.21 → 1; v2026.05.21.3 → 3
-  let max = 1;
-  for (const t of same) {
-    const m = t.match(/^v\d{4}\.\d{2}\.\d{2}(?:\.(\d+))?$/);
-    if (!m) continue;
-    const n = m[1] ? parseInt(m[1], 10) : 1;
-    if (n > max) max = n;
-  }
-  return today + '.' + (max + 1);
+  return (
+    d.getUTCFullYear() +
+    '.' + pad(d.getUTCMonth() + 1) +
+    '.' + pad(d.getUTCDate()) +
+    '.' + pad(d.getUTCHours()) + pad(d.getUTCMinutes())
+  );
 }
 
 if (TAG_ONLY) {
@@ -97,7 +84,7 @@ if (TAG_ONLY) {
     process.exit(1);
   }
   const v = fs.readFileSync(VERSION_FILE, 'utf8').trim();
-  if (!/^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/.test(v)) {
+  if (!/^\d{4}\.\d{2}\.\d{2}\.\d{4}$/.test(v)) {
     console.error('VERSION file contents look invalid: ' + JSON.stringify(v));
     process.exit(1);
   }

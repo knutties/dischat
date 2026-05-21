@@ -266,10 +266,15 @@
     }
     if (!author) author = 'unknown';
 
+    // Avatar: same `#child-comments-*` scoping. The visible per-comment avatar
+    // on the current Discussions UI is `img.avatar.circle` inside the name
+    // link — `img.avatar-user` only shows up on nested-reply wrappers, so
+    // preferring it for top-level comments grabs a child's avatar.
+    const avs = $$('img.avatar-user, img.avatar, img[class*="avatar" i]', el).filter(outsideChildComments);
     const avatarEl =
-      el.querySelector('img.avatar-user') ||
-      el.querySelector('img.avatar') ||
-      el.querySelector('img[class*="avatar" i]');
+      avs.find((i) => /\bavatar-user\b/.test(i.className || '')) ||
+      avs[0] ||
+      null;
     const bodyEl =
       el.querySelector('.comment-body') ||
       el.querySelector('.js-comment-body') ||

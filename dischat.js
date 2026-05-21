@@ -144,8 +144,12 @@
     #${ROOT_ID} .dc-day::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: #383b40; z-index: 0; }
     #${ROOT_ID} .dc-day span { background: #1a1d21; position: relative; padding: 0 12px; z-index: 1; border: 1px solid #383b40; border-radius: 12px; }
 
-    #${ROOT_ID} .dc-msg { display: grid; grid-template-columns: 36px 1fr; gap: 10px; padding: 6px 20px; }
+    #${ROOT_ID} .dc-msg { position: relative; display: grid; grid-template-columns: 36px 1fr; gap: 10px; padding: 6px 20px; }
     #${ROOT_ID} .dc-msg:hover { background: #222529; }
+    #${ROOT_ID} .dc-actions { position: absolute; top: -10px; right: 20px; background: #1a1d21; border: 1px solid #383b40; border-radius: 6px; display: flex; gap: 0; padding: 1px; opacity: 0; pointer-events: none; transition: opacity .08s ease; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+    #${ROOT_ID} .dc-msg:hover .dc-actions { opacity: 1; pointer-events: auto; }
+    #${ROOT_ID} .dc-action { background: transparent; border: 0; color: #d1d2d3; cursor: pointer; padding: 4px 10px; font: 700 12px/1 inherit; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px; }
+    #${ROOT_ID} .dc-action:hover { background: #27242c; color: #1d9bd1; }
     #${ROOT_ID} .dc-msg.cont { padding-top: 1px; padding-bottom: 1px; }
     #${ROOT_ID} .dc-msg.cont .av { visibility: hidden; }
     #${ROOT_ID} .dc-msg.cont .meta { display: none; }
@@ -393,7 +397,75 @@
       });
     }
 
+    // Ensure the OP (discussion body) is included. On the React-based
+    // Discussions UI it lives outside the timeline-item containers, so the
+    // strategies above miss it entirely.
+    const op = scrapeOP();
+    if (op) {
+      const alreadyHas = messages.some((m) => {
+        if (!m.node || !op.node) return false;
+        return m.node === op.node || m.node.contains(op.node) || op.node.contains(m.node);
+      });
+      if (!alreadyHas) messages.unshift(op);
+    }
+
     return { title, category, state, messages };
+  }
+
+  function scrapeOP() {
+    const root = document.getElementById(ROOT_ID);
+    const external = (el) => el && (!root || !root.contains(el));
+
+    let bodyEl =
+      $('[data-testid="discussion-body"]') ||
+      $('.discussion-body .markdown-body') ||
+      $('.discussion-body') ||
+      $('.js-discussion-body');
+
+    if (!bodyEl || !external(bodyEl)) {
+      const candidates = $$('.markdown-body, [class*="MarkdownContent"]')
+        .filter(external)
+        .filter((b) => !b.closest('.js-timeline-item, .TimelineItem, [data-testid="timeline-item"]'));
+      bodyEl = candidates[0] || null;
+    }
+    if (!bodyEl) return null;
+
+    // Climb to a likely OP scope so we can find the matching author / time
+    // metadata that lives in the discussion header above the body.
+    let scope = bodyEl;
+    for (let i = 0; i < 8; i++) {
+      const parent = scope.parentElement;
+      if (!parent || parent === document.body) break;
+      if (
+        parent.matches(
+          'article, main, [class*="DiscussionHeader"], [class*="discussion-show"], [data-testid*="discussion"]'
+        )
+      ) {
+        scope = parent;
+        break;
+      }
+      scope = parent;
+    }
+
+    const authorEl =
+      scope.querySelector('a.author, a[data-hovercard-type="user"]') ||
+      $('header a[data-hovercard-type="user"]');
+    const avatarEl =
+      scope.querySelector('img.avatar-user, img.avatar, img[class*="avatar" i]');
+    const timeEl = scope.querySelector('relative-time, time-ago, time');
+
+    return {
+      id: commentId(scope) || bodyEl.id || 'op',
+      author: txt(authorEl) || 'unknown',
+      authorUrl: authorEl ? authorEl.href : '',
+      avatar: avatarEl ? avatarEl.src : '',
+      bodyHtml: bodyEl.innerHTML,
+      ts: timeEl ? timeEl.getAttribute('datetime') || '' : '',
+      isAnswer: false,
+      node: scope,
+      itemNode: scope,
+      replies: [],
+    };
   }
 
   function scrapeIndex() {
@@ -454,8 +526,25 @@
       opts.threadBtn || null
     );
 
+    const actions = opts.inThread
+      ? null
+      : h(
+          'div',
+          { class: 'dc-actions' },
+          h(
+            'button',
+            {
+              class: 'dc-action',
+              type: 'button',
+              title: m.replies && m.replies.length ? 'Reply in thread' : 'Reply in thread',
+              onclick: function () { openThread(m, _channelName); },
+            },
+            'Reply'
+          )
+        );
+
     const cls = 'dc-msg' + (opts.cont ? ' cont' : '') + (opts.isOp ? ' op' : '');
-    return h('div', { class: cls }, h('div', { class: 'av' }, av), body);
+    return h('div', { class: cls }, h('div', { class: 'av' }, av), body, actions);
   }
 
   function renderThreadButton(m, channelName) {
@@ -492,13 +581,15 @@
       h(
         'div',
         { class: 'dc-thr-msgs' },
-        renderMessage(m, { isOp: false }),
+        renderMessage(m, { isOp: false, inThread: true }),
         h(
           'div',
           { class: 'dc-thr-divider' },
-          m.replies.length + (m.replies.length === 1 ? ' reply' : ' replies')
+          (m.replies || []).length
+            ? m.replies.length + (m.replies.length === 1 ? ' reply' : ' replies')
+            : 'No replies yet — start the thread.'
         ),
-        m.replies.map((r) => renderMessage(r))
+        (m.replies || []).map((r) => renderMessage(r, { inThread: true }))
       ),
       buildCompose({
         placeholder: 'Reply…',
@@ -1022,13 +1113,15 @@
       h(
         'div',
         { class: 'dc-thr-msgs' },
-        renderMessage(message, { isOp: false }),
+        renderMessage(message, { isOp: false, inThread: true }),
         h(
           'div',
           { class: 'dc-thr-divider' },
-          message.replies.length + (message.replies.length === 1 ? ' reply' : ' replies')
+          (message.replies || []).length
+            ? message.replies.length + (message.replies.length === 1 ? ' reply' : ' replies')
+            : 'No replies yet — start the thread.'
         ),
-        message.replies.map((r) => renderMessage(r))
+        (message.replies || []).map((r) => renderMessage(r, { inThread: true }))
       ),
       buildCompose({
         placeholder: 'Reply…',

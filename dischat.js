@@ -237,10 +237,16 @@
   }
 
   function scrapeMessage(el) {
+    // GitHub renders TWO `a[data-hovercard-type="user"]` per comment: one
+    // wrapping just the avatar (empty text), one wrapping the username.
+    // Prefer the link that has actual text content.
+    const authorLinks = $$('a[data-hovercard-type="user"]', el);
     const authorEl =
       el.querySelector('.timeline-comment-header a.author') ||
       el.querySelector('a.author') ||
-      el.querySelector('a[data-hovercard-type="user"]');
+      authorLinks.find((a) => txt(a).length > 0) ||
+      authorLinks[0] ||
+      null;
     const avatarEl =
       el.querySelector('img.avatar-user') ||
       el.querySelector('img.avatar') ||
@@ -323,54 +329,74 @@
 
     let messages = [];
 
-    // Preferred: each top-level discussion comment lives inside its own
-    // `.js-timeline-item` container; nested replies are descendants of that
-    // same container. This handles the common case where GitHub renders
-    // replies as siblings of the top comment within the item (not nested
-    // inside the top comment element itself).
-    const itemSels = [
-      '.js-timeline-item',
-      '.TimelineItem',
-      '[data-testid="timeline-item"]',
-    ];
-    let items = [];
-    for (const sel of itemSels) {
-      items = $$(sel).filter(
-        (it) =>
-          !inRoot(it) &&
-          it.querySelector('.markdown-body, .comment-body, .js-comment-body, [class*="MarkdownContent"]') &&
-          it.querySelector('a.author, a[data-hovercard-type="user"]')
-      );
-      if (items.length) break;
-    }
-
-    if (items.length) {
-      messages = items
-        .map((item) => {
-          const candidates = $$('.timeline-comment, .js-comment, [data-testid*="comment"]', item).filter(
-            (c) => c.querySelector('.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"]')
+    // Strategy A — current GitHub Discussions UI: OP and top-level comments
+    // share `.discussions-timeline-scroll-target.js-targetable-element`; OP
+    // has id `discussion-N`, top-level comments have id `discussioncomment-N`.
+    // Nested replies are `.discussions-timeline-scroll-target` (without
+    // js-targetable-element) inside `#child-comments-<parent-id>`.
+    const topEls = $$('.discussions-timeline-scroll-target.js-targetable-element').filter(
+      (el) =>
+        !inRoot(el) && /^(discussion|discussioncomment)-\d+$/.test(el.id)
+    );
+    if (topEls.length) {
+      messages = topEls.map((el) => {
+        const m = scrapeMessage(el);
+        m.isOpStandalone = /^discussion-\d+$/.test(el.id);
+        const childWrap = document.getElementById('child-comments-' + el.id);
+        if (childWrap) {
+          const replyEls = $$('.discussions-timeline-scroll-target', childWrap).filter(
+            (r) => /^discussioncomment-\d+$/.test(r.id) && !r.classList.contains('js-targetable-element')
           );
-          if (!candidates.length) return null;
-          // De-dupe nested wrappers within the same item.
-          const set = new Set(candidates);
-          const outers = candidates.filter((c) => {
-            let p = c.parentElement;
-            while (p && p !== item) {
-              if (set.has(p)) return false;
-              p = p.parentElement;
-            }
-            return true;
-          });
-          if (!outers.length) return null;
-          const top = scrapeMessage(outers[0]);
-          top.replies = outers.slice(1).map(scrapeMessage);
-          top.itemNode = item;
-          return top;
-        })
-        .filter(Boolean);
+          m.replies = replyEls.map(scrapeMessage);
+        } else {
+          m.replies = [];
+        }
+        m.itemNode = el;
+        return m;
+      });
     }
 
-    // Fallback: ancestor-walk grouping if timeline items aren't present.
+    // Strategy B — older timeline-item layouts.
+    if (!messages.length) {
+      const itemSels = ['.js-timeline-item', '.TimelineItem', '[data-testid="timeline-item"]'];
+      let items = [];
+      for (const sel of itemSels) {
+        items = $$(sel).filter(
+          (it) =>
+            !inRoot(it) &&
+            it.querySelector('.markdown-body, .comment-body, .js-comment-body, [class*="MarkdownContent"]') &&
+            it.querySelector('a.author, a[data-hovercard-type="user"]')
+        );
+        if (items.length) break;
+      }
+      if (items.length) {
+        messages = items
+          .map((item) => {
+            const cands = $$('.timeline-comment, .js-comment, [data-testid*="comment"]', item).filter(
+              (c) =>
+                c.querySelector('.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"]')
+            );
+            if (!cands.length) return null;
+            const set = new Set(cands);
+            const outers = cands.filter((c) => {
+              let p = c.parentElement;
+              while (p && p !== item) {
+                if (set.has(p)) return false;
+                p = p.parentElement;
+              }
+              return true;
+            });
+            if (!outers.length) return null;
+            const top = scrapeMessage(outers[0]);
+            top.replies = cands.filter((c) => !outers.includes(c)).map(scrapeMessage);
+            top.itemNode = item;
+            return top;
+          })
+          .filter(Boolean);
+      }
+    }
+
+    // Strategy C — ancestor-walk fallback.
     if (!messages.length) {
       const comments = findCommentElements();
       const set = new Set(comments);
@@ -397,16 +423,20 @@
       });
     }
 
-    // Ensure the OP (discussion body) is included. On the React-based
-    // Discussions UI it lives outside the timeline-item containers, so the
-    // strategies above miss it entirely.
-    const op = scrapeOP();
-    if (op) {
-      const alreadyHas = messages.some((m) => {
-        if (!m.node || !op.node) return false;
-        return m.node === op.node || m.node.contains(op.node) || op.node.contains(m.node);
-      });
-      if (!alreadyHas) messages.unshift(op);
+    // Ensure the OP is included for layouts that don't expose it via
+    // Strategy A.
+    if (!messages.some((m) => m.isOpStandalone)) {
+      const op = scrapeOP();
+      if (op) {
+        const alreadyHas = messages.some((m) => {
+          if (!m.node || !op.node) return false;
+          return m.node === op.node || m.node.contains(op.node) || op.node.contains(m.node);
+        });
+        if (!alreadyHas) {
+          op.isOpStandalone = true;
+          messages.unshift(op);
+        }
+      }
     }
 
     return { title, category, state, messages };
@@ -638,7 +668,7 @@
     let lastDay = null;
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
-      const isOp = i === 0;
+      const isOp = !!m.isOpStandalone;
       const t = m.ts ? new Date(m.ts).getTime() : 0;
       const day = m.ts ? new Date(m.ts).toDateString() : null;
       if (day && day !== lastDay) {
@@ -933,37 +963,69 @@
   }
 
   // Find (and if necessary, open) the GitHub textarea that will accept the post.
-  // - For thread mode: scoped to the originating comment's timeline-item; clicks
-  //   the in-page Reply / Add comment trigger if the textarea isn't visible yet.
+  // - For thread mode: scoped strictly to the originating comment's
+  //   `#child-comments-<id>` reply container; never falls through to the
+  //   page-level composer (which would post a top-level comment, not a
+  //   reply).
   // - For top-level: the bottom-of-page comment form.
-  async function getGithubTextarea(ctxNode, isReply) {
+  async function getGithubTextarea(ctxNode, ctxId, isReply) {
     const root = document.getElementById(ROOT_ID);
     const external = (el) => el && (!root || !root.contains(el));
     const visExt = (el) => external(el) && visible(el);
 
     function findIn(container) {
+      if (!container) return null;
       const list = Array.from(container.querySelectorAll('textarea')).filter(visExt);
       return list.length ? list[list.length - 1] : null;
     }
 
-    if (isReply && ctxNode) {
-      const container =
-        (ctxNode.closest && (ctxNode.closest('.js-timeline-item') || ctxNode.closest('.TimelineItem'))) || ctxNode;
+    if (isReply) {
+      // The right scope is the per-comment reply container.
+      let container = ctxId ? document.getElementById('child-comments-' + ctxId) : null;
+      if (!container && ctxNode) {
+        container =
+          (ctxNode.closest && (ctxNode.closest('.TimelineItem, .js-timeline-item'))) || ctxNode;
+      }
+      if (!container) return null;
+
       let ta = findIn(container);
       if (ta) return ta;
 
-      // Try to expand a Reply trigger near the comment.
-      const triggers = Array.from(container.querySelectorAll('button, a, summary')).filter((b) => {
-        const t = (b.textContent || '').trim();
-        const al = (b.getAttribute && (b.getAttribute('aria-label') || '')) || '';
-        return /^(reply|add (a )?comment|write (a )?reply)$/i.test(t) || /reply/i.test(al);
-      });
+      // Look for a reply trigger near the comment. Prefer triggers with
+      // `data-hotkey="r"` (Quote reply / Reply buttons on Discussions).
+      const triggers = Array.from(container.querySelectorAll('button, a, summary'))
+        .concat(
+          ctxNode
+            ? Array.from(
+                (ctxNode.closest('.TimelineItem, .js-timeline-item') || ctxNode).querySelectorAll(
+                  'button[data-hotkey="r"], a[data-hotkey="r"], .js-comment-quote-reply, .js-comment-reply'
+                )
+              )
+            : []
+        );
+      const seen = new Set();
       for (const tr of triggers) {
+        if (seen.has(tr)) continue;
+        seen.add(tr);
+        const t = (tr.textContent || '').trim();
+        const al = (tr.getAttribute && (tr.getAttribute('aria-label') || '')) || '';
+        const cls = tr.className || '';
+        const okText = /reply/i.test(t) || /reply/i.test(al);
+        const okClass = /quote-reply|comment-reply|reply-link/i.test(cls);
+        const okHotkey = tr.getAttribute && tr.getAttribute('data-hotkey') === 'r';
+        if (!(okText || okClass || okHotkey)) continue;
         try { tr.click(); } catch (e) {}
         ta = await waitFor(() => findIn(container), 2500, 80);
         if (ta) return ta;
       }
-      // Fallback to page-level form.
+      // Last resort: a textarea in the parent comment's outer container
+      // (in case GitHub renders the reply form just outside #child-comments).
+      const outer = ctxNode && (ctxNode.closest('.TimelineItem, .js-timeline-item') || ctxNode.parentElement);
+      if (outer && outer !== container) {
+        ta = findIn(outer);
+        if (ta) return ta;
+      }
+      return null;
     }
 
     const sels = [
@@ -1008,14 +1070,14 @@
 
     if (overlayCompose) overlayCompose.classList.add('compose-busy');
 
-    const ta = await getGithubTextarea(ctxNode, isReply);
+    const ta = await getGithubTextarea(ctxNode, ctxId, isReply);
     if (!ta) {
       if (overlayCompose) overlayCompose.classList.remove('compose-busy');
       alert(
-        "Dischat: couldn't find GitHub's reply box.\n" +
-          (isReply
-            ? "This comment may not have a Reply trigger — try opening the discussion in GitHub once to confirm."
-            : "Make sure you're signed in and the discussion is open for comments.")
+        isReply
+          ? "Dischat: couldn't open the reply form for this comment.\n" +
+              "Sign in on GitHub and confirm you can reply to this comment in the normal view, then try again."
+          : "Dischat: couldn't find GitHub's comment box. Make sure you're signed in."
       );
       return;
     }

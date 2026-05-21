@@ -22,6 +22,7 @@
   // Module-level state for in-place refresh.
   let _channelName = '';
   let _openThreadId = null;
+  let _canPost = false;
 
   if (!singleMatch && !indexMatch) {
     alert(
@@ -203,6 +204,8 @@
 
     #${ROOT_ID} .dc-compose { padding: 0 20px 16px; background: #1a1d21; flex-shrink: 0; }
     #${ROOT_ID} .dc-compose .row { background: transparent; border: 1px solid #565856; border-radius: 8px; padding: 8px 10px 8px 14px; display: flex; align-items: end; gap: 8px; transition: border-color .1s ease; }
+    #${ROOT_ID} .dc-compose .row.read-only { color: #9a9b9e; font-size: 13px; padding: 10px 14px; cursor: default; border-style: dashed; }
+    #${ROOT_ID} .dc-compose .read-only-text { line-height: 1.4; }
     #${ROOT_ID} .dc-compose .row:focus-within { border-color: #1d9bd1; }
     #${ROOT_ID} .compose-input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font: inherit; resize: none; min-height: 22px; max-height: 200px; line-height: 1.46; padding: 3px 0; }
     #${ROOT_ID} .compose-input::placeholder { color: #6a6772; }
@@ -237,16 +240,32 @@
   }
 
   function scrapeMessage(el) {
-    // GitHub renders TWO `a[data-hovercard-type="user"]` per comment: one
-    // wrapping just the avatar (empty text), one wrapping the username.
-    // Prefer the link that has actual text content.
-    const authorLinks = $$('a[data-hovercard-type="user"]', el);
-    const authorEl =
-      el.querySelector('.timeline-comment-header a.author') ||
-      el.querySelector('a.author') ||
-      authorLinks.find((a) => txt(a).length > 0) ||
-      authorLinks[0] ||
-      null;
+    // GitHub puts `a.author` and `a[data-hovercard-type="user"]` on the
+    // comment's author link, but the *same* element also wraps each nested
+    // reply (inside `#child-comments-<id>`) — so a plain `querySelector`
+    // returns whichever appears first in DOM order, which can be a nested
+    // reply's author. Scope the search to links that aren't inside a
+    // child-comments container.
+    function outsideChildComments(a) {
+      let p = a.parentElement;
+      while (p && p !== el) {
+        if (p.id && p.id.indexOf('child-comments-') === 0) return false;
+        p = p.parentElement;
+      }
+      return true;
+    }
+
+    const allLinks = $$('a[data-hovercard-type="user"], a.author', el).filter(outsideChildComments);
+    // Prefer a link with visible text (username) over an avatar-only wrapper.
+    let authorEl = allLinks.find((a) => txt(a).length > 0) || allLinks[0] || null;
+
+    let author = txt(authorEl);
+    if (!author && authorEl && authorEl.href) {
+      const m = authorEl.href.match(/github\.com\/([^/?#]+)/);
+      if (m) author = m[1];
+    }
+    if (!author) author = 'unknown';
+
     const avatarEl =
       el.querySelector('img.avatar-user') ||
       el.querySelector('img.avatar') ||
@@ -265,7 +284,7 @@
 
     return {
       id: commentId(el),
-      author: txt(authorEl) || 'unknown',
+      author: author,
       authorUrl: authorEl ? authorEl.href : '',
       avatar: avatarEl ? avatarEl.src : '',
       bodyHtml: bodyEl ? bodyEl.innerHTML : '<p><em>(no body found)</em></p>',
@@ -556,22 +575,23 @@
       opts.threadBtn || null
     );
 
-    const actions = opts.inThread
-      ? null
-      : h(
-          'div',
-          { class: 'dc-actions' },
-          h(
-            'button',
-            {
-              class: 'dc-action',
-              type: 'button',
-              title: m.replies && m.replies.length ? 'Reply in thread' : 'Reply in thread',
-              onclick: function () { openThread(m, _channelName); },
-            },
-            'Reply'
-          )
-        );
+    const actions =
+      opts.inThread || !_canPost
+        ? null
+        : h(
+            'div',
+            { class: 'dc-actions' },
+            h(
+              'button',
+              {
+                class: 'dc-action',
+                type: 'button',
+                title: 'Reply in thread',
+                onclick: function () { openThread(m, _channelName); },
+              },
+              'Reply'
+            )
+          );
 
     const cls = 'dc-msg' + (opts.cont ? ' cont' : '') + (opts.isOp ? ' op' : '');
     return h('div', { class: cls }, h('div', { class: 'av' }, av), body, actions);
@@ -621,12 +641,14 @@
         ),
         (m.replies || []).map((r) => renderMessage(r, { inThread: true }))
       ),
-      buildCompose({
-        placeholder: 'Reply…',
-        mode: 'thread',
-        ctxNode: m.node,
-        ctxId: m.id,
-      })
+      _canPost
+        ? buildCompose({
+            placeholder: 'Reply…',
+            mode: 'thread',
+            ctxNode: m.node,
+            ctxId: m.id,
+          })
+        : readOnlyNotice()
     );
   }
 
@@ -745,10 +767,10 @@
       )
     );
 
-    const compose = buildCompose({
-      placeholder: 'Message #' + channelName,
-      mode: 'top',
-    });
+    _canPost = commentsEnabled();
+    const compose = _canPost
+      ? buildCompose({ placeholder: 'Message #' + channelName, mode: 'top' })
+      : readOnlyNotice();
 
     const main = h(
       'div',
@@ -761,6 +783,49 @@
     const thr = h('div', { class: 'dc-thr' });
 
     root.append(side, main, thr);
+  }
+
+  // Heuristic: GitHub renders a "Sign in to comment" link or a "discussion
+  // is closed/locked" banner inside `.discussion-timeline-actions` when
+  // posting isn't available. If we can't see a comment form anywhere on the
+  // page, treat the discussion as read-only — never click anything that
+  // could change state (lock/unlock/close/reopen).
+  function commentsEnabled() {
+    if ($('[data-test-selector="comments-sign-in-link"]')) return false;
+    const actions = $('.discussion-timeline-actions');
+    if (actions) {
+      if (/sign in|sign up|join this conversation|locked|closed/i.test(txt(actions))) {
+        if (!actions.querySelector('form, textarea')) return false;
+      }
+    }
+    // Any visible comment textarea anywhere = signed in + open for comments.
+    const tas = $$('textarea').filter((t) => {
+      const root = document.getElementById(ROOT_ID);
+      if (root && root.contains(t)) return false;
+      const name = (t.getAttribute('name') || '').toLowerCase();
+      const ph = (t.getAttribute('placeholder') || '').toLowerCase();
+      return /comment|body|reply|discussion/.test(name) || /reply|comment|write/i.test(ph);
+    });
+    if (tas.length) return true;
+    // No textarea but a reply trigger exists — counts as enabled (the
+    // textarea will be injected when the trigger fires).
+    return !!$('button[data-hotkey="r"], .js-comment-quote-reply, .js-comment-reply');
+  }
+
+  function readOnlyNotice() {
+    return h(
+      'div',
+      { class: 'dc-compose' },
+      h(
+        'div',
+        { class: 'row read-only' },
+        h(
+          'span',
+          { class: 'read-only-text' },
+          'Read only — sign in on GitHub, or this discussion is closed.'
+        )
+      )
+    );
   }
 
   function renderIndex(root, org, repo) {
@@ -1185,12 +1250,14 @@
         ),
         (message.replies || []).map((r) => renderMessage(r, { inThread: true }))
       ),
-      buildCompose({
-        placeholder: 'Reply…',
-        mode: 'thread',
-        ctxNode: message.node,
-        ctxId: message.id,
-      })
+      _canPost
+        ? buildCompose({
+            placeholder: 'Reply…',
+            mode: 'thread',
+            ctxNode: message.node,
+            ctxId: message.id,
+          })
+        : readOnlyNotice()
     );
     const msgs = thr.querySelector('.dc-thr-msgs');
     if (msgs) msgs.scrollTop = msgs.scrollHeight;

@@ -1,64 +1,86 @@
 #!/usr/bin/env node
-/* claude-respond.js — invoked by .github/workflows/claude.yml.
+/* discuss-respond.js — invoked by .github/workflows/discuss.yml.
  *
  * Reads the triggering GitHub event from $GITHUB_EVENT_PATH, fetches the
- * full discussion via GraphQL, calls the Anthropic Messages API, and posts
- * Claude's reply back as a discussion comment (threaded under the
+ * full discussion via GraphQL, calls the configured AI provider, and
+ * posts the reply back via `addDiscussionComment` (threaded under the
  * triggering comment when applicable).
  *
  * Required env:
- *   ANTHROPIC_API_KEY   API key from https://console.anthropic.com/
- *   GITHUB_TOKEN        Auto-provided by the runner; needs discussions:write
- *   GITHUB_REPOSITORY   "owner/repo"  (set by runner)
- *   GITHUB_EVENT_PATH   Path to event payload JSON (set by runner)
+ *   PROVIDER            github | anthropic | gemini  (default: github)
+ *   GITHUB_TOKEN        Auto-provided; needs discussions:write + models:read
+ *   GITHUB_REPOSITORY   "owner/repo"          (set by runner)
+ *   GITHUB_EVENT_PATH   Path to event JSON    (set by runner)
  *   GITHUB_EVENT_NAME   "discussion" | "discussion_comment"
  *
+ * Conditional env:
+ *   ANTHROPIC_API_KEY   Required when PROVIDER=anthropic
+ *   GEMINI_API_KEY      Required when PROVIDER=gemini
+ *
  * Optional env:
- *   MODEL               default "claude-opus-4-7"
+ *   MODEL               provider-specific; blank => provider default
  *   MAX_TOKENS          default 4096
- *   TRIGGER             default "@claude"
+ *   TRIGGER             default "@ai"
  */
 'use strict';
 
 const fs = require('fs');
 
 const {
-  ANTHROPIC_API_KEY,
+  PROVIDER = 'github',
+  MODEL = '',
+  MAX_TOKENS = '4096',
+  TRIGGER = '@ai',
   GITHUB_TOKEN,
+  ANTHROPIC_API_KEY,
+  GEMINI_API_KEY,
   GITHUB_REPOSITORY,
   GITHUB_EVENT_PATH,
   GITHUB_EVENT_NAME,
-  MODEL = 'claude-opus-4-7',
-  MAX_TOKENS = '4096',
-  TRIGGER = '@claude',
 } = process.env;
+
+const DEFAULT_MODELS = {
+  github: 'openai/gpt-4o-mini',
+  anthropic: 'claude-opus-4-7',
+  gemini: 'gemini-2.0-flash',
+};
+
+const PROVIDER_LABELS = {
+  github: 'GitHub Models',
+  anthropic: 'Anthropic',
+  gemini: 'Google Gemini',
+};
 
 function die(msg) {
   console.error(msg);
   process.exit(1);
 }
 
-if (!ANTHROPIC_API_KEY) die('ANTHROPIC_API_KEY not set');
 if (!GITHUB_TOKEN) die('GITHUB_TOKEN not set');
 if (!GITHUB_REPOSITORY) die('GITHUB_REPOSITORY not set');
 if (!GITHUB_EVENT_PATH) die('GITHUB_EVENT_PATH not set');
+if (!DEFAULT_MODELS[PROVIDER]) die(`unknown provider: "${PROVIDER}" (expected github | anthropic | gemini)`);
+if (PROVIDER === 'anthropic' && !ANTHROPIC_API_KEY) die('ANTHROPIC_API_KEY is required when provider=anthropic');
+if (PROVIDER === 'gemini' && !GEMINI_API_KEY) die('GEMINI_API_KEY is required when provider=gemini');
+
+const model = MODEL || DEFAULT_MODELS[PROVIDER];
+const maxTokens = parseInt(MAX_TOKENS, 10) || 4096;
 
 const event = JSON.parse(fs.readFileSync(GITHUB_EVENT_PATH, 'utf8'));
-
 const isComment = GITHUB_EVENT_NAME === 'discussion_comment';
 const triggerObj = isComment ? event.comment : event.discussion;
 const sender = event.sender;
 
 if (sender && sender.type === 'Bot') {
-  console.log('skipping: triggered by a bot');
+  console.log('skip: triggered by a bot');
   process.exit(0);
 }
 if (!triggerObj || !triggerObj.body) {
-  console.log('skipping: no body on triggering object');
+  console.log('skip: no body on triggering object');
   process.exit(0);
 }
 if (!triggerObj.body.includes(TRIGGER)) {
-  console.log(`skipping: trigger "${TRIGGER}" not in body`);
+  console.log(`skip: trigger "${TRIGGER}" not in body`);
   process.exit(0);
 }
 
@@ -74,7 +96,7 @@ async function gql(query, variables) {
       Authorization: `Bearer ${GITHUB_TOKEN}`,
       'Content-Type': 'application/json',
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'dischat-claude/1.0',
+      'User-Agent': 'dischat-discuss/1.0',
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -84,6 +106,81 @@ async function gql(query, variables) {
   if (json.errors) throw new Error('GraphQL errors: ' + JSON.stringify(json.errors));
   return json.data;
 }
+
+async function callGithubModels(system, user) {
+  const res = await fetch('https://models.github.ai/inference/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`GitHub Models HTTP ${res.status}: ${text}`);
+  const json = JSON.parse(text);
+  return ((json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '').trim();
+}
+
+async function callAnthropic(system, user) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Anthropic HTTP ${res.status}: ${text}`);
+  const json = JSON.parse(text);
+  return (json.content || [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
+}
+
+async function callGemini(system, user) {
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=` +
+    encodeURIComponent(GEMINI_API_KEY);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: user }] }],
+      generationConfig: { maxOutputTokens: maxTokens },
+    }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Gemini HTTP ${res.status}: ${text}`);
+  const json = JSON.parse(text);
+  const parts = (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts) || [];
+  return parts.map((p) => p.text || '').join('').trim();
+}
+
+const PROVIDERS = {
+  github: callGithubModels,
+  anthropic: callAnthropic,
+  gemini: callGemini,
+};
 
 async function main() {
   // 1. Fetch the full discussion thread for context.
@@ -119,10 +216,9 @@ async function main() {
   const d = data.repository && data.repository.discussion;
   if (!d) die('discussion not found via GraphQL');
 
-  // 2. Figure out which comment we should thread under. Discussions only
-  //    support one level of nesting: top-level comments, plus replies to a
-  //    top-level. A reply to a reply just lands as another sibling reply,
-  //    so resolve to the top-level parent if the trigger was a reply.
+  // 2. Resolve the top-level parent for threading. Discussions only allow
+  //    one nesting level, so a reply triggering this should still land
+  //    under the original top-level comment.
   let replyToId = null;
   if (triggerNodeId) {
     for (const c of d.comments.nodes) {
@@ -137,7 +233,7 @@ async function main() {
     }
   }
 
-  // 3. Build a plain-text context blob for Claude.
+  // 3. Build a plain-text context blob.
   const lines = [];
   lines.push(`Repository: ${owner}/${repo}`);
   lines.push(`Discussion #${discussionNumber}: ${d.title}`);
@@ -155,11 +251,11 @@ async function main() {
   }
   const context = lines.join('\n');
 
-  // 4. Ask Claude for a reply.
+  // 4. Ask the configured provider for a reply.
   const system =
-    `You are Claude, summoned via "${TRIGGER}" into a GitHub Discussion in ${owner}/${repo}.\n` +
+    `You are an AI assistant summoned via "${TRIGGER}" into a GitHub Discussion in ${owner}/${repo}.\n` +
     `Reply concisely and helpfully in GitHub-flavored Markdown.\n` +
-    `Do not repeat the "${TRIGGER}" trigger phrase. Do not address yourself with "@Claude".\n` +
+    `Do not repeat the "${TRIGGER}" trigger phrase. Do not address yourself with it.\n` +
     `If a question is unclear, ask one focused follow-up rather than guessing widely.\n` +
     `Cite repository files using \`path/to/file.ext:LINE\` references when relevant.`;
 
@@ -168,36 +264,18 @@ async function main() {
     `The latest message that summoned you was posted by @${senderLogin}. ` +
     `Reply to that message in this thread.`;
 
-  const anth = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: parseInt(MAX_TOKENS, 10) || 4096,
-      system,
-      messages: [{ role: 'user', content: userMessage }],
-    }),
-  });
-  const anthText = await anth.text();
-  if (!anth.ok) throw new Error(`Anthropic HTTP ${anth.status}: ${anthText}`);
-  const anthJson = JSON.parse(anthText);
-  const reply = (anthJson.content || [])
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
+  const call = PROVIDERS[PROVIDER];
+  const reply = await call(system, userMessage);
   if (!reply) {
-    console.log('Claude returned an empty response — nothing to post');
+    console.log('provider returned an empty response — nothing to post');
     return;
   }
 
   const footer =
-    '\n\n<sub><em>— Replying via Claude (`' +
-    MODEL +
+    '\n\n<sub><em>— Replying via ' +
+    PROVIDER_LABELS[PROVIDER] +
+    ' (`' +
+    model +
     '`). Triggered by `' +
     TRIGGER +
     '` in @' +

@@ -1,0 +1,93 @@
+name: AI respond in discussions (reusable)
+
+# Reusable workflow that responds to a trigger phrase (default "@ai") in
+# GitHub Discussions, using a configurable AI provider:
+#
+#   provider: github     (default) — GitHub Models, free, uses GITHUB_TOKEN
+#   provider: anthropic  — Anthropic API, needs ANTHROPIC_API_KEY secret
+#   provider: gemini     — Google Gemini, needs GEMINI_API_KEY secret
+#
+# Minimal caller (free tier, no extra secrets) in another repo's
+# .github/workflows/discuss.yml:
+#
+#   name: AI in discussions
+#   on:
+#     discussion:
+#       types: [created]
+#     discussion_comment:
+#       types: [created]
+#   permissions:
+#     discussions: write
+#     contents: read
+#     models: read
+#   jobs:
+#     ai:
+#       uses: knutties/dischat/.github/workflows/discuss.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        description: 'AI provider: github | anthropic | gemini'
+        type: string
+        required: false
+        default: github
+      model:
+        description: 'Model id (provider-specific). Leave blank to use the provider default.'
+        type: string
+        required: false
+        default: ''
+      max-tokens:
+        description: 'Max tokens for the reply.'
+        type: number
+        required: false
+        default: 4096
+      trigger:
+        description: 'Substring that must appear in the body to trigger a response.'
+        type: string
+        required: false
+        default: '@ai'
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: 'Required when provider=anthropic. https://console.anthropic.com/'
+        required: false
+      GEMINI_API_KEY:
+        description: 'Required when provider=gemini. https://aistudio.google.com/apikey'
+        required: false
+
+# Caller must also grant these scopes — reusable workflows can't widen
+# the caller's GITHUB_TOKEN permissions.
+permissions:
+  discussions: write
+  contents: read
+  models: read
+
+jobs:
+  respond:
+    runs-on: ubuntu-latest
+    # Skip bot-authored events so the workflow doesn't reply to itself.
+    if: ${{ github.event.sender.type != 'Bot' }}
+    steps:
+      - name: Check out responder script
+        uses: actions/checkout@v4
+        with:
+          repository: knutties/dischat
+          ref: main
+          path: dischat-responder
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run responder
+        working-directory: dischat-responder
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          MAX_TOKENS: ${{ inputs.max-tokens }}
+          TRIGGER: ${{ inputs.trigger }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: node .github/scripts/discuss-respond.js

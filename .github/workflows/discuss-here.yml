@@ -1,0 +1,20 @@
+name: AI in discussions
+
+# Dogfood caller for this repo's own Discussions. Invokes the reusable
+# workflow at .github/workflows/discuss.yml. Default provider is
+# GitHub Models — no extra secret required.
+
+on:
+  discussion:
+    types: [created]
+  discussion_comment:
+    types: [created]
+
+permissions:
+  discussions: write
+  contents: read
+  models: read
+
+jobs:
+  ai:
+    uses: ./.github/workflows/discuss.yml

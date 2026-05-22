@@ -74,3 +74,54 @@ The build pipeline is a single Node script that shells out to terser (`npx --yes
 - **GitHub DOM changes.** Selectors are best-effort with fallbacks. If a layout change breaks parsing, the overlay shows an explicit empty state — selectors live in `findCommentElements` / `scrapeOP` / `scrapeSingle` in `dischat.js`.
 - **Comment HTML is reused as-is** from GitHub's already-rendered markdown output. It inherits GitHub's server-side sanitization.
 - **CSP.** A loader-style bookmarklet that pulls the script from a CDN won't work on `github.com` — the site's `script-src` header blocks external sources. That's why the script is inlined.
+
+## Invite Claude to a discussion (`@claude`)
+
+This repo also ships a reusable GitHub Actions workflow that lets any other repo summon Claude into its Discussions just by `@`-mentioning it. The workflow lives in `.github/workflows/claude.yml`, with the responder script at `.github/scripts/claude-respond.js`.
+
+### Use it from another repo
+
+1. Add an `ANTHROPIC_API_KEY` repo secret (get a key at <https://console.anthropic.com/>).
+2. Drop this into `.github/workflows/claude.yml` in the caller repo:
+
+   ```yaml
+   name: Claude in discussions
+   on:
+     discussion:
+       types: [created]
+     discussion_comment:
+       types: [created]
+
+   permissions:
+     discussions: write
+     contents: read
+
+   jobs:
+     claude:
+       uses: knutties/dischat/.github/workflows/claude.yml@main
+       secrets:
+         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+   ```
+
+3. Open a Discussion (or a comment on one) containing `@claude` somewhere in the body. The workflow runs, Claude reads the full thread, and replies as a comment — threaded under the triggering comment when applicable.
+
+### Optional inputs
+
+```yaml
+jobs:
+  claude:
+    uses: knutties/dischat/.github/workflows/claude.yml@main
+    with:
+      model: claude-opus-4-7        # default
+      max-tokens: 4096              # default
+      trigger: '@claude'            # default — switch to e.g. '/ask-claude' if you prefer
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+### Notes
+
+- Replies are posted by `github-actions[bot]`, with a small footer noting the model and trigger.
+- Bot-authored comments are ignored so Claude doesn't reply to itself.
+- The workflow fetches the entire discussion via the GitHub GraphQL API for context, so Claude sees the title, OP body, and every existing comment — not just the triggering message.
+- For per-comment threaded replies, the script resolves the top-level parent (Discussions only support one level of nesting).

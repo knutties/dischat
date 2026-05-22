@@ -74,3 +74,83 @@ The build pipeline is a single Node script that shells out to terser (`npx --yes
 - **GitHub DOM changes.** Selectors are best-effort with fallbacks. If a layout change breaks parsing, the overlay shows an explicit empty state — selectors live in `findCommentElements` / `scrapeOP` / `scrapeSingle` in `dischat.js`.
 - **Comment HTML is reused as-is** from GitHub's already-rendered markdown output. It inherits GitHub's server-side sanitization.
 - **CSP.** A loader-style bookmarklet that pulls the script from a CDN won't work on `github.com` — the site's `script-src` header blocks external sources. That's why the script is inlined.
+
+## Reply to discussions with an AI (`@ai`)
+
+This repo also ships a reusable GitHub Actions workflow that lets any other repo summon an AI assistant into its Discussions just by `@`-mentioning it. The workflow lives in `.github/workflows/discuss.yml`, with the responder script at `.github/scripts/discuss-respond.js`.
+
+The default provider is **GitHub Models** — free, uses the workflow's built-in `GITHUB_TOKEN`, no extra account needed. You can opt into **Anthropic** or **Google Gemini** by setting the `provider` input and supplying their API key as a secret.
+
+### Use it from another repo (free / GitHub Models)
+
+Drop this into `.github/workflows/discuss.yml` in the caller repo — no secrets required:
+
+```yaml
+name: AI in discussions
+on:
+  discussion:
+    types: [created]
+  discussion_comment:
+    types: [created]
+
+permissions:
+  discussions: write
+  contents: read
+  models: read
+
+jobs:
+  ai:
+    uses: knutties/dischat/.github/workflows/discuss.yml@main
+```
+
+Then open a Discussion (or post a comment) containing `@ai` somewhere in the body. The workflow runs, the model reads the full thread, and replies as a comment — threaded under the triggering comment when applicable.
+
+### Inputs
+
+| Input | Default | Notes |
+|---|---|---|
+| `provider` | `github` | `github` \| `anthropic` \| `gemini` |
+| `model` | provider default | See per-provider defaults below |
+| `max-tokens` | `4096` | |
+| `trigger` | `@ai` | Any substring; e.g. switch to `/ask` if you prefer a slash command |
+
+Per-provider defaults: `openai/gpt-4o-mini` (github), `claude-opus-4-7` (anthropic), `gemini-2.0-flash` (gemini). Pick alternatives from the [GitHub Models catalog](https://github.com/marketplace?type=models), the [Anthropic models list](https://docs.anthropic.com/en/docs/about-claude/models/overview), or the [Gemini models list](https://ai.google.dev/gemini-api/docs/models).
+
+### Use Anthropic instead
+
+Add an `ANTHROPIC_API_KEY` repo secret (get one at <https://console.anthropic.com/>), then:
+
+```yaml
+jobs:
+  ai:
+    uses: knutties/dischat/.github/workflows/discuss.yml@main
+    with:
+      provider: anthropic
+      model: claude-opus-4-7    # optional
+      trigger: '@claude'        # optional — match your trigger to the brand if you like
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+### Use Google Gemini instead
+
+Add a `GEMINI_API_KEY` repo secret (get one at <https://aistudio.google.com/apikey>), then:
+
+```yaml
+jobs:
+  ai:
+    uses: knutties/dischat/.github/workflows/discuss.yml@main
+    with:
+      provider: gemini
+      model: gemini-2.0-flash   # optional
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+```
+
+### Notes
+
+- Replies are posted by `github-actions[bot]`, with a small footer naming the provider, model, and trigger.
+- Bot-authored events are ignored, so the AI never replies to itself.
+- The workflow fetches the entire discussion via the GitHub GraphQL API for context, so the model sees the title, OP body, and every existing comment — not just the triggering message.
+- For per-comment threaded replies, the script resolves the top-level parent (Discussions only support one level of nesting).
+- The caller workflow must grant `discussions: write`, `contents: read`, and (for the default GitHub Models provider) `models: read`. Reusable workflows can't widen the caller's `GITHUB_TOKEN` scopes.

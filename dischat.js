@@ -255,14 +255,47 @@
       return true;
     }
 
-    const allLinks = $$('a[data-hovercard-type="user"], a.author', el).filter(outsideChildComments);
-    // Prefer a link with visible text (username) over an avatar-only wrapper.
+    // GitHub auto-renders `@username` mentions inside comment bodies as
+    // `a[data-hovercard-type="user"]` too — so if we don't exclude body
+    // links, a bot's reply that mentions @OP in its text gets attributed
+    // back to the OP. Walk up: any author candidate sitting inside a body
+    // container is disqualified.
+    function inHeader(a) {
+      let p = a.parentElement;
+      while (p && p !== el) {
+        if (
+          p.matches(
+            '.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"], [data-testid="comment-body"]'
+          )
+        ) {
+          return false;
+        }
+        p = p.parentElement;
+      }
+      return true;
+    }
+
+    // App / bot accounts (e.g. github-actions[bot]) don't get the user
+    // hovercard or `a.author` class — their author link is `/apps/<slug>`.
+    // Accept those too.
+    const allLinks = $$(
+      'a[data-hovercard-type="user"], a.author, a[href^="/apps/"]',
+      el
+    )
+      .filter(outsideChildComments)
+      .filter(inHeader);
     let authorEl = allLinks.find((a) => txt(a).length > 0) || allLinks[0] || null;
 
     let author = txt(authorEl);
     if (!author && authorEl && authorEl.href) {
-      const m = authorEl.href.match(/github\.com\/([^/?#]+)/);
+      const m = authorEl.href.match(/github\.com\/(?:apps\/)?([^/?#]+)/);
       if (m) author = m[1];
+    }
+    // Bot accounts are usually rendered as "github-actions" with a separate
+    // "[bot]" label/badge alongside — make that explicit so the overlay's
+    // author chip reads "github-actions[bot]" instead of just the slug.
+    if (author && authorEl && /^\/apps\//.test(authorEl.getAttribute('href') || '') && !/\[bot\]$/i.test(author)) {
+      author = author + '[bot]';
     }
     if (!author) author = 'unknown';
 
@@ -311,7 +344,7 @@
       const items = $$(sel).filter(
         (el) =>
           el.querySelector('.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"]') &&
-          el.querySelector('a.author, a[data-hovercard-type="user"]')
+          el.querySelector('a.author, a[data-hovercard-type="user"], a[href^="/apps/"]')
       );
       if (items.length) return items;
     }
@@ -319,7 +352,7 @@
     // and isn't nested inside another candidate.
     const cands = $$('div, article, li').filter(
       (el) =>
-        el.querySelector('a[data-hovercard-type="user"]') &&
+        el.querySelector('a[data-hovercard-type="user"], a[href^="/apps/"]') &&
         el.querySelector('.markdown-body, [class*="MarkdownContent"]')
     );
     const set = new Set(cands);

@@ -23,6 +23,9 @@
   let _channelName = '';
   let _openThreadId = null;
   let _canPost = false;
+  let _refreshObserver = null;
+  let _refreshTimer = null;
+  let _lastFingerprint = null;
 
   if (!singleMatch && !indexMatch) {
     alert(
@@ -821,6 +824,123 @@
     const thr = h('div', { class: 'dc-thr' });
 
     root.append(side, main, thr);
+
+    // Watch GitHub's own DOM for changes (new comments arriving via the
+    // live updates, the user posting via the overlay, the bot replying,
+    // etc.) and re-render the message list automatically.
+    setupAutoRefresh(data.messages);
+  }
+
+  // ---------- auto-refresh ----------
+  function messageFingerprint(messages) {
+    // Cheap content hash: ids + body length + timestamps + reply ids.
+    // Enough to detect new comments, edits, and reply arrivals without
+    // recomputing the entire render on every unrelated DOM mutation.
+    return messages
+      .map((m) => {
+        const reps = (m.replies || [])
+          .map((r) => r.id + ':' + (r.bodyHtml || '').length)
+          .join(',');
+        return (
+          (m.id || '') +
+          ':' +
+          (m.bodyHtml || '').length +
+          ':' +
+          (m.ts || '') +
+          (reps ? '|' + reps : '')
+        );
+      })
+      .join('\n');
+  }
+
+  function refreshMessages() {
+    const overlayRoot = document.getElementById(ROOT_ID);
+    if (!overlayRoot) return;
+    // Skip while a thread panel is open — re-rendering the list would
+    // pull the rug out from under the open thread's `node` references.
+    if (overlayRoot.classList.contains('thread-open')) return;
+    const oldMsgs = overlayRoot.querySelector('.dc-msgs');
+    if (!oldMsgs) return;
+
+    let data;
+    try {
+      data = scrapeSingle();
+    } catch (e) {
+      return;
+    }
+    const fp = messageFingerprint(data.messages);
+    if (fp === _lastFingerprint) return;
+    _lastFingerprint = fp;
+
+    const channelName = _channelName || channelize(data.title);
+    const nearBottom =
+      oldMsgs.scrollHeight - oldMsgs.scrollTop - oldMsgs.clientHeight < 120;
+    const oldScrollTop = oldMsgs.scrollTop;
+
+    const newMsgs = renderMessageList(data.messages, channelName);
+    oldMsgs.parentNode.replaceChild(newMsgs, oldMsgs);
+
+    if (nearBottom) newMsgs.scrollTop = newMsgs.scrollHeight;
+    else newMsgs.scrollTop = oldScrollTop;
+
+    const countEl = overlayRoot.querySelector('.dc-head-count');
+    if (countEl) {
+      const n = data.messages.length;
+      countEl.textContent = n + (n === 1 ? ' message' : ' messages');
+    }
+  }
+
+  function setupAutoRefresh(initialMessages) {
+    teardownAutoRefresh();
+    _lastFingerprint = messageFingerprint(initialMessages);
+    const overlayRoot = document.getElementById(ROOT_ID);
+
+    _refreshObserver = new MutationObserver((mutations) => {
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        // Ignore mutations that originate inside our own overlay — we
+        // never want our re-renders to trigger another re-render.
+        let n = m.target;
+        let inOverlay = false;
+        while (n) {
+          if (n === overlayRoot) {
+            inOverlay = true;
+            break;
+          }
+          n = n.parentNode;
+        }
+        if (inOverlay) continue;
+
+        if (_refreshTimer) clearTimeout(_refreshTimer);
+        _refreshTimer = setTimeout(() => {
+          _refreshTimer = null;
+          try {
+            refreshMessages();
+          } catch (e) {
+            /* keep observer alive even if one refresh throws */
+          }
+        }, 500);
+        return;
+      }
+    });
+
+    _refreshObserver.observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  }
+
+  function teardownAutoRefresh() {
+    if (_refreshObserver) {
+      _refreshObserver.disconnect();
+      _refreshObserver = null;
+    }
+    if (_refreshTimer) {
+      clearTimeout(_refreshTimer);
+      _refreshTimer = null;
+    }
+    _lastFingerprint = null;
   }
 
   // Heuristic: GitHub renders a "Sign in to comment" link or a "discussion
@@ -1302,6 +1422,7 @@
   }
 
   function closeChat() {
+    teardownAutoRefresh();
     const r = document.getElementById(ROOT_ID);
     if (r) r.remove();
     const s = document.getElementById(STYLE_ID);

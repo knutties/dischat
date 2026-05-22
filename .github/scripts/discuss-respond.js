@@ -20,7 +20,7 @@
  * Optional env:
  *   MODEL               provider-specific; blank => provider default
  *   MAX_TOKENS          default 4096
- *   TRIGGER             default "@ai"
+ *   TRIGGER             default "@dischat-bot"
  */
 'use strict';
 
@@ -30,7 +30,7 @@ const {
   PROVIDER = 'github',
   MODEL = '',
   MAX_TOKENS = '4096',
-  TRIGGER = '@ai',
+  TRIGGER = '@dischat-bot',
   GITHUB_TOKEN,
   ANTHROPIC_API_KEY,
   GEMINI_API_KEY,
@@ -271,6 +271,9 @@ async function main() {
     return;
   }
 
+  // Wrap @senderLogin in backticks so GitHub doesn't auto-link it (which
+  // would both ping the user every time and confuse downstream scrapers
+  // that pick the first `a[data-hovercard-type="user"]` they see).
   const footer =
     '\n\n<sub><em>— Replying via ' +
     PROVIDER_LABELS[PROVIDER] +
@@ -278,9 +281,9 @@ async function main() {
     model +
     '`). Triggered by `' +
     TRIGGER +
-    '` in @' +
+    '` in `@' +
     senderLogin +
-    "'s message.</em></sub>";
+    "`'s message.</em></sub>";
   const body = reply + footer;
 
   // 5. Post.

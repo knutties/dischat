@@ -46,7 +46,7 @@ on:
         description: 'Substring that must appear in the body to trigger a response.'
         type: string
         required: false
-        default: '@ai'
+        default: '@dischat-bot'
     secrets:
       ANTHROPIC_API_KEY:
         description: 'Required when provider=anthropic. https://console.anthropic.com/'

@@ -75,7 +75,7 @@ The build pipeline is a single Node script that shells out to terser (`npx --yes
 - **Comment HTML is reused as-is** from GitHub's already-rendered markdown output. It inherits GitHub's server-side sanitization.
 - **CSP.** A loader-style bookmarklet that pulls the script from a CDN won't work on `github.com` — the site's `script-src` header blocks external sources. That's why the script is inlined.
 
-## Reply to discussions with an AI (`@ai`)
+## Reply to discussions with an AI (`@dischat-bot`)
 
 This repo also ships a reusable GitHub Actions workflow that lets any other repo summon an AI assistant into its Discussions just by `@`-mentioning it. The workflow lives in `.github/workflows/discuss.yml`, with the responder script at `.github/scripts/discuss-respond.js`.
 
@@ -103,7 +103,7 @@ jobs:
     uses: knutties/dischat/.github/workflows/discuss.yml@main
 ```
 
-Then open a Discussion (or post a comment) containing `@ai` somewhere in the body. The workflow runs, the model reads the full thread, and replies as a comment — threaded under the triggering comment when applicable.
+Then open a Discussion (or post a comment) containing `@dischat-bot` somewhere in the body. The workflow runs, the model reads the full thread, and replies as a comment — threaded under the triggering comment when applicable.
 
 ### Inputs
 
@@ -112,7 +112,7 @@ Then open a Discussion (or post a comment) containing `@ai` somewhere in the bod
 | `provider` | `github` | `github` \| `anthropic` \| `gemini` |
 | `model` | provider default | See per-provider defaults below |
 | `max-tokens` | `4096` | |
-| `trigger` | `@ai` | Any substring; e.g. switch to `/ask` if you prefer a slash command |
+| `trigger` | `@dischat-bot` | Any substring; e.g. switch to `/ask` if you prefer a slash command |
 
 Per-provider defaults: `openai/gpt-4o-mini` (github), `claude-opus-4-7` (anthropic), `gemini-2.0-flash` (gemini). Pick alternatives from the [GitHub Models catalog](https://github.com/marketplace?type=models), the [Anthropic models list](https://docs.anthropic.com/en/docs/about-claude/models/overview), or the [Gemini models list](https://ai.google.dev/gemini-api/docs/models).
 

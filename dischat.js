@@ -23,6 +23,9 @@
   let _channelName = '';
   let _openThreadId = null;
   let _canPost = false;
+  let _refreshObserver = null;
+  let _refreshTimer = null;
+  let _lastFingerprint = null;
 
   if (!singleMatch && !indexMatch) {
     alert(
@@ -255,14 +258,47 @@
       return true;
     }
 
-    const allLinks = $$('a[data-hovercard-type="user"], a.author', el).filter(outsideChildComments);
-    // Prefer a link with visible text (username) over an avatar-only wrapper.
+    // GitHub auto-renders `@username` mentions inside comment bodies as
+    // `a[data-hovercard-type="user"]` too — so if we don't exclude body
+    // links, a bot's reply that mentions @OP in its text gets attributed
+    // back to the OP. Walk up: any author candidate sitting inside a body
+    // container is disqualified.
+    function inHeader(a) {
+      let p = a.parentElement;
+      while (p && p !== el) {
+        if (
+          p.matches(
+            '.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"], [data-testid="comment-body"]'
+          )
+        ) {
+          return false;
+        }
+        p = p.parentElement;
+      }
+      return true;
+    }
+
+    // App / bot accounts (e.g. github-actions[bot]) don't get the user
+    // hovercard or `a.author` class — their author link is `/apps/<slug>`.
+    // Accept those too.
+    const allLinks = $$(
+      'a[data-hovercard-type="user"], a.author, a[href^="/apps/"]',
+      el
+    )
+      .filter(outsideChildComments)
+      .filter(inHeader);
     let authorEl = allLinks.find((a) => txt(a).length > 0) || allLinks[0] || null;
 
     let author = txt(authorEl);
     if (!author && authorEl && authorEl.href) {
-      const m = authorEl.href.match(/github\.com\/([^/?#]+)/);
+      const m = authorEl.href.match(/github\.com\/(?:apps\/)?([^/?#]+)/);
       if (m) author = m[1];
+    }
+    // Bot accounts are usually rendered as "github-actions" with a separate
+    // "[bot]" label/badge alongside — make that explicit so the overlay's
+    // author chip reads "github-actions[bot]" instead of just the slug.
+    if (author && authorEl && /^\/apps\//.test(authorEl.getAttribute('href') || '') && !/\[bot\]$/i.test(author)) {
+      author = author + '[bot]';
     }
     if (!author) author = 'unknown';
 
@@ -311,7 +347,7 @@
       const items = $$(sel).filter(
         (el) =>
           el.querySelector('.comment-body, .js-comment-body, .markdown-body, [class*="MarkdownContent"]') &&
-          el.querySelector('a.author, a[data-hovercard-type="user"]')
+          el.querySelector('a.author, a[data-hovercard-type="user"], a[href^="/apps/"]')
       );
       if (items.length) return items;
     }
@@ -319,7 +355,7 @@
     // and isn't nested inside another candidate.
     const cands = $$('div, article, li').filter(
       (el) =>
-        el.querySelector('a[data-hovercard-type="user"]') &&
+        el.querySelector('a[data-hovercard-type="user"], a[href^="/apps/"]') &&
         el.querySelector('.markdown-body, [class*="MarkdownContent"]')
     );
     const set = new Set(cands);
@@ -788,6 +824,123 @@
     const thr = h('div', { class: 'dc-thr' });
 
     root.append(side, main, thr);
+
+    // Watch GitHub's own DOM for changes (new comments arriving via the
+    // live updates, the user posting via the overlay, the bot replying,
+    // etc.) and re-render the message list automatically.
+    setupAutoRefresh(data.messages);
+  }
+
+  // ---------- auto-refresh ----------
+  function messageFingerprint(messages) {
+    // Cheap content hash: ids + body length + timestamps + reply ids.
+    // Enough to detect new comments, edits, and reply arrivals without
+    // recomputing the entire render on every unrelated DOM mutation.
+    return messages
+      .map((m) => {
+        const reps = (m.replies || [])
+          .map((r) => r.id + ':' + (r.bodyHtml || '').length)
+          .join(',');
+        return (
+          (m.id || '') +
+          ':' +
+          (m.bodyHtml || '').length +
+          ':' +
+          (m.ts || '') +
+          (reps ? '|' + reps : '')
+        );
+      })
+      .join('\n');
+  }
+
+  function refreshMessages() {
+    const overlayRoot = document.getElementById(ROOT_ID);
+    if (!overlayRoot) return;
+    // Skip while a thread panel is open — re-rendering the list would
+    // pull the rug out from under the open thread's `node` references.
+    if (overlayRoot.classList.contains('thread-open')) return;
+    const oldMsgs = overlayRoot.querySelector('.dc-msgs');
+    if (!oldMsgs) return;
+
+    let data;
+    try {
+      data = scrapeSingle();
+    } catch (e) {
+      return;
+    }
+    const fp = messageFingerprint(data.messages);
+    if (fp === _lastFingerprint) return;
+    _lastFingerprint = fp;
+
+    const channelName = _channelName || channelize(data.title);
+    const nearBottom =
+      oldMsgs.scrollHeight - oldMsgs.scrollTop - oldMsgs.clientHeight < 120;
+    const oldScrollTop = oldMsgs.scrollTop;
+
+    const newMsgs = renderMessageList(data.messages, channelName);
+    oldMsgs.parentNode.replaceChild(newMsgs, oldMsgs);
+
+    if (nearBottom) newMsgs.scrollTop = newMsgs.scrollHeight;
+    else newMsgs.scrollTop = oldScrollTop;
+
+    const countEl = overlayRoot.querySelector('.dc-head-count');
+    if (countEl) {
+      const n = data.messages.length;
+      countEl.textContent = n + (n === 1 ? ' message' : ' messages');
+    }
+  }
+
+  function setupAutoRefresh(initialMessages) {
+    teardownAutoRefresh();
+    _lastFingerprint = messageFingerprint(initialMessages);
+    const overlayRoot = document.getElementById(ROOT_ID);
+
+    _refreshObserver = new MutationObserver((mutations) => {
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        // Ignore mutations that originate inside our own overlay — we
+        // never want our re-renders to trigger another re-render.
+        let n = m.target;
+        let inOverlay = false;
+        while (n) {
+          if (n === overlayRoot) {
+            inOverlay = true;
+            break;
+          }
+          n = n.parentNode;
+        }
+        if (inOverlay) continue;
+
+        if (_refreshTimer) clearTimeout(_refreshTimer);
+        _refreshTimer = setTimeout(() => {
+          _refreshTimer = null;
+          try {
+            refreshMessages();
+          } catch (e) {
+            /* keep observer alive even if one refresh throws */
+          }
+        }, 500);
+        return;
+      }
+    });
+
+    _refreshObserver.observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  }
+
+  function teardownAutoRefresh() {
+    if (_refreshObserver) {
+      _refreshObserver.disconnect();
+      _refreshObserver = null;
+    }
+    if (_refreshTimer) {
+      clearTimeout(_refreshTimer);
+      _refreshTimer = null;
+    }
+    _lastFingerprint = null;
   }
 
   // Heuristic: GitHub renders a "Sign in to comment" link or a "discussion
@@ -1269,6 +1422,7 @@
   }
 
   function closeChat() {
+    teardownAutoRefresh();
     const r = document.getElementById(ROOT_ID);
     if (r) r.remove();
     const s = document.getElementById(STYLE_ID);
